@@ -31,6 +31,7 @@ import {
     startLoadingModel,
     setLoadedModel,
     deleteModel,
+    unloadModel,
 } from '../store/slices/llmSlice';
 import LLMService, {
     DownloadProgressEvent,
@@ -118,8 +119,10 @@ const ModelItem = memo(
         onDownload,
         onCancelDownload,
         onLoad,
+        onUnload,
         onDelete,
         onSelect,
+        preferredBackend,
         colors,
     }: {
         model: ModelInfo;
@@ -129,8 +132,10 @@ const ModelItem = memo(
         onDownload: () => void;
         onCancelDownload: () => void;
         onLoad: () => void;
+        onUnload: () => void;
         onDelete: () => void;
         onSelect: () => void;
+        preferredBackend: string;
         colors: any;
     }) => {
         const { status, progress, speedMBs, bytesDownloaded, totalBytes, error } =
@@ -318,12 +323,6 @@ const ModelItem = memo(
                     {/* Status 3: Downloaded (Ready to Load or Delete) */}
                     {isDownloaded && (
                         <View style={styles.downloadedActionsRow}>
-                            {/* <View style={styles.downloadedBadge}>
-                                <CheckIcon color="#10A37F" />
-                                <Text style={styles.downloadedBadgeText}>
-                                    Downloaded on Device
-                                </Text>
-                            </View> */}
                             <View style={styles.buttonGroup}>
                                 <Pressable
                                     onPress={onDelete}
@@ -344,55 +343,73 @@ const ModelItem = memo(
                     )}
 
                     {/* Status 4: Loading */}
-                    {isLoading && (
-                        <View
-                            style={[
-                                styles.loadingButton,
-                                { backgroundColor: colors.card },
-                            ]}>
-                            <ActivityIndicator size="small" color="#10A37F" />
-                            <Text
+                    {isLoading && (() => {
+                        // Show the actual backend chain being tried
+                        const backendChain = (() => {
+                            switch (preferredBackend) {
+                                case 'NPU': return 'NPU → GPU → CPU';
+                                case 'GPU': return 'GPU → CPU';
+                                case 'CPU': return 'CPU';
+                                default: return 'NPU \u2192 GPU \u2192 CPU'; // AUTO
+                            }
+                        })();
+                        return (
+                            <View
                                 style={[
-                                    styles.buttonText,
-                                    { color: '#10A37F' },
+                                    styles.loadingButton,
+                                    { backgroundColor: colors.card },
                                 ]}>
-                                Initializing weights (NPU/GPU/CPU)...
-                            </Text>
-                        </View>
-                    )}
-
-                    {/* Status 5: Loaded (Active) */}
-                    {isLoaded && (
-                        <View style={styles.loadedRow}>
-                            <View style={styles.activeLoadedBadge}>
-                                <View style={styles.activeDot} />
-                                <Text style={styles.activeLoadedText}>
-                                    Active & Loaded ({activeBackend || 'CPU'})
+                                <ActivityIndicator size="small" color="#10A37F" />
+                                <Text
+                                    style={[
+                                        styles.buttonText,
+                                        { color: '#10A37F' },
+                                    ]}>
+                                    Trying {backendChain}...
                                 </Text>
                             </View>
-                            <View style={styles.buttonGroup}>
-                                <Pressable
-                                    onPress={onDelete}
-                                    hitSlop={8}
-                                    style={styles.deleteIconButton}>
-                                    <TrashIcon color="#FF453A" />
-                                </Pressable>
-                                <Pressable
-                                    onPress={onSelect}
-                                    style={[
-                                        styles.selectedModelButton,
-                                        {
-                                            backgroundColor: colors.card,
-                                            borderColor: '#10A37F',
-                                        },
-                                    ]}>
-                                    <Text style={styles.selectedModelButtonText}>
-                                        Select
-                                    </Text>
-                                </Pressable>
+                        );
+                    })()}
+
+                    {/* Status 5: Loaded (Active) */}
+                    {isLoaded && (() => {
+                        // Check if the model is loaded on a different backend than preferred
+                        const needsReload = activeBackend && preferredBackend !== 'AUTO' && 
+                            activeBackend.toUpperCase() !== preferredBackend.toUpperCase();
+                        
+                        return (
+                            <View style={styles.loadedRow}>
+                                <View style={styles.buttonGroup}>
+                                    <Pressable
+                                        onPress={onDelete}
+                                        hitSlop={8}
+                                        style={styles.deleteIconButton}>
+                                        <TrashIcon color="#FF453A" />
+                                    </Pressable>
+                                    <Pressable
+                                        onPress={onUnload}
+                                        style={[
+                                            styles.unloadButton,
+                                            { backgroundColor: colors.card, borderColor: colors.border },
+                                        ]}>
+                                        <Text style={[styles.unloadButtonText, { color: colors.text }]}>
+                                            Unload
+                                        </Text>
+                                    </Pressable>
+                                    {needsReload && (
+                                        <Pressable
+                                            onPress={onLoad}
+                                            style={styles.loadButton}>
+                                            <BoltIcon color="#FFFFFF" />
+                                            <Text style={styles.loadButtonText}>
+                                                Reload on {preferredBackend}
+                                            </Text>
+                                        </Pressable>
+                                    )}
+                                </View>
                             </View>
-                        </View>
-                    )}
+                        );
+                    })()}
                 </View>
             </View>
         );
@@ -491,6 +508,9 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     );
     const activeBackend = useSelector(
         (state: RootState) => state.llm.activeBackend
+    );
+    const loadedModelId = useSelector(
+        (state: RootState) => state.llm.loadedModelId
     );
 
     // Sync disk state for all models on mount & when modal opens
@@ -595,8 +615,27 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     );
 
     // Real Model Loading Handler with Fallback Notification
+    // Auto-unloads any previously loaded model before loading the new one
     const handleLoad = useCallback(
         async (model: ModelInfo) => {
+            // Unload any currently loaded model first
+            if (loadedModelId && loadedModelId !== model.id) {
+                try {
+                    await LLMService.unloadModel();
+                    dispatch(unloadModel());
+                } catch (err) {
+                    console.warn('[ModelSelector] Failed to unload previous model:', err);
+                }
+            } else if (loadedModelId === model.id) {
+                // Same model but reloading on different backend
+                try {
+                    await LLMService.unloadModel();
+                    dispatch(unloadModel());
+                } catch (err) {
+                    console.warn('[ModelSelector] Failed to unload model for reload:', err);
+                }
+            }
+
             dispatch(startLoadingModel(model.id));
             try {
                 const result = await LLMService.initialize(
@@ -632,7 +671,21 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 );
             }
         },
-        [dispatch, onSelectModel, preferredBackend]
+        [dispatch, onSelectModel, preferredBackend, loadedModelId]
+    );
+
+    // Unload Model Handler
+    const handleUnload = useCallback(
+        async () => {
+            try {
+                await LLMService.unloadModel();
+                dispatch(unloadModel());
+            } catch (err) {
+                console.error('[ModelSelector] Unload error:', err);
+                Alert.alert('Unload Failed', 'Could not unload the model from memory.');
+            }
+        },
+        [dispatch]
     );
 
     return (
@@ -761,7 +814,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                     isSelected={model.id === selectedModelId}
                                     modelState={modelState}
                                     activeBackend={
-                                        model.id === selectedModelId
+                                        model.id === loadedModelId
                                             ? activeBackend
                                             : null
                                     }
@@ -770,11 +823,13 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                         handleCancelDownload(model.id)
                                     }
                                     onLoad={() => handleLoad(model)}
+                                    onUnload={handleUnload}
                                     onDelete={() => handleDelete(model)}
                                     onSelect={() => {
                                         onSelectModel(model.id);
                                         closeModal();
                                     }}
+                                    preferredBackend={preferredBackend}
                                     colors={colors}
                                 />
                             );
@@ -1073,6 +1128,16 @@ const styles = StyleSheet.create({
         gap: 8,
         paddingVertical: 10,
         borderRadius: 12,
+    },
+    unloadButton: {
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 10,
+        borderWidth: 1,
+    },
+    unloadButtonText: {
+        fontSize: 13,
+        fontWeight: '600',
     },
     loadedRow: {
         flexDirection: 'row',

@@ -363,7 +363,7 @@ class LLMModule(
                     "NPU" -> listOf("NPU", "GPU", "CPU")
                     "GPU" -> listOf("GPU", "CPU")
                     "CPU" -> listOf("CPU")
-                    else -> listOf("GPU", "CPU") // AUTO: skip NPU by default for stability
+                    else -> listOf("NPU", "GPU", "CPU") // AUTO: try all backends
                 }
 
                 var initializedEngine: Engine? = null

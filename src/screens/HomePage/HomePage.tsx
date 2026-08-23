@@ -28,6 +28,8 @@ import { RootState } from '../../store/store';
 import {
     AVAILABLE_MODELS,
     setSelectedModel,
+    startLoadingModel,
+    setLoadedModel,
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import useLLM from '../../hooks/useLLM';
@@ -244,7 +246,14 @@ const HomePage = () => {
         try {
             // Auto-load model if not loaded yet
             if (currentStatus !== 'loaded') {
-                await loadModel(selectedModel.fileName, preferredBackend);
+                dispatch(startLoadingModel(selectedModel.id));
+                const result = await loadModel(selectedModel.fileName, preferredBackend);
+                dispatch(
+                    setLoadedModel({
+                        modelId: selectedModel.id,
+                        backend: result.actualBackend,
+                    })
+                );
             }
 
             const response = await generate(query);
@@ -272,8 +281,11 @@ const HomePage = () => {
         currentStatus,
         loadModel,
         selectedModel.fileName,
+        selectedModel.id,
         generate,
         streamedText,
+        dispatch,
+        preferredBackend,
     ]);
 
     // Memoized dynamic styles
