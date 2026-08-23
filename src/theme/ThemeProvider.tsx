@@ -9,7 +9,7 @@ import { useSelector } from 'react-redux';
 
 import lightTheme from './lightTheme';
 import darkTheme from './darkTheme';
-import { store } from "../store/store";
+import { RootState } from '../store/store';
 
 export type ThemeType = typeof lightTheme;
 
@@ -21,9 +21,8 @@ interface ThemeProviderProps {
 
 export const ThemeProvider = ({ children }: ThemeProviderProps) => {
   const systemTheme = useColorScheme();
-  type RootState = ReturnType<typeof store.getState>;
   const themeMode = useSelector(
-    (state: RootState) => state.theme.theme
+    (state: RootState) => state.theme.themeMode
   );
 
   const theme = useMemo(() => {

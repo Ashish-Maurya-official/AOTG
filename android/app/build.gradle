@@ -110,10 +110,23 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:+")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation jscFlavor
+    }
+}
+
+// Force coroutines 1.11.0 globally - LiteRT-LM was compiled against it
+// but its POM incorrectly declares 1.9.0
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0'
+        force 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
+        force 'org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.11.0'
     }
 }
