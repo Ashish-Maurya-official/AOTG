@@ -45,16 +45,18 @@ export const parseMessage = (text: string): MessageBlock[] => {
             }
         } else {
             // Now parse tables within standard text
-            // Matches consecutive lines that start and end with a pipe character
-            const tableRegex = /((?:^[ \t]*\|.*\|[ \t]*(?:\n|$))+)/m;
+            // Matches consecutive lines containing pipes, requiring a markdown delimiter row (---)
+            const tableRegex = /((?:^[ \t]*[^\n]*\|[^\n]*(?:\n|$))(?:^[ \t]*\|?[ \t]*:?-+[ \t]*\|[-:\s\|]*(?:\n|$))(?:^[ \t]*[^\n]*\|[^\n]*(?:\n|$))*)/m;
             const subParts = part.split(tableRegex);
 
             subParts.forEach((subPart) => {
                 if (!subPart) return;
 
                 const trimmed = subPart.trim();
-                // A valid markdown table should have at least two rows (header and separator)
-                if (trimmed.startsWith('|') && trimmed.endsWith('|') && subPart.includes('\n')) {
+                // A valid markdown table subPart must contain a delimiter row
+                const isTable = /^[ \t]*\|?[ \t]*:?-+[ \t]*\|/m.test(trimmed);
+                
+                if (isTable && trimmed.includes('\n')) {
                     blocks.push({
                         id: `block-${blockCounter++}`,
                         type: 'table',

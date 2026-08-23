@@ -16,7 +16,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
             let cleaned = line;
             if (cleaned.startsWith('|')) cleaned = cleaned.substring(1);
             if (cleaned.endsWith('|')) cleaned = cleaned.substring(0, cleaned.length - 1);
-            
+
             // Split by pipe
             return cleaned.split('|').map(cell => cell.trim());
         });
@@ -37,25 +37,73 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
     const header = parsedTable[0];
     const body = parsedTable.slice(1);
 
+    // Calculate dynamic widths for each column to maintain grid alignment
+    const colWidths = header.map((h, colIndex) => {
+        const headerCell = h || '';
+        const bodyCells = body.map(row => row[colIndex] || '');
+        const maxLen = Math.max(headerCell.length, ...bodyCells.map(c => c.length));
+        return Math.max(60, Math.min(maxLen * 8 + 32, 300));
+    });
+
+    const renderInlineText = (text: string) => {
+        const parts = text.split(/(\*\*.*?\*\*|\*[^\*]+\*|`.*?`|\$[\s\S]*?\$)/g);
+
+        return parts.map((part, index) => {
+            if (part.startsWith('**') && part.endsWith('**')) {
+                return <Text key={index} style={{ fontWeight: 'bold' }}>{part.slice(2, -2)}</Text>;
+            }
+            if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+                return <Text key={index} style={{ fontStyle: 'italic' }}>{part.slice(1, -1)}</Text>;
+            }
+            if (part.startsWith('`') && part.endsWith('`')) {
+                return <Text key={index} style={[styles.inlineCode, { backgroundColor: colors.border }]}>{part.slice(1, -1)}</Text>;
+            }
+            if (part.startsWith('$') && part.endsWith('$')) {
+                let mathContent = part.slice(1, -1).replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←').replace(/\\log/g, 'log');
+                return <Text key={index} style={{ fontStyle: 'italic', color: '#10A37F', fontWeight: '500' }}>{mathContent}</Text>;
+            }
+            let cleaned = part.replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←');
+            return <Text key={index}>{cleaned}</Text>;
+        });
+    };
+
     return (
-        <View style={styles.wrapper}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={true} style={styles.scroll}>
-                <View>
+        <View style={[styles.wrapper]}>
+            <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={true}
+                contentContainerStyle={styles.tableContainer}
+                nestedScrollEnabled={true}
+            >
+                <View style={styles.tableContainer}>
                     {/* Header Row */}
-                    <View style={[styles.row, styles.headerRow]}>
+                    <View style={[styles.row, { borderBottomWidth: 1, borderBottomColor: colors.border }]}>
                         {header.map((cell, index) => (
-                            <View key={`header-${index}`} style={styles.cell}>
-                                <Text style={[styles.headerText, { color: colors.text }]}>{cell}</Text>
+                            <View key={`header-${index}`} style={[
+                                styles.cell,
+                                { width: colWidths[index] }
+                            ]}>
+                                <Text style={[styles.headerText, { color: colors.text }]}>
+                                    {renderInlineText(cell)}
+                                </Text>
                             </View>
                         ))}
                     </View>
 
                     {/* Body Rows */}
                     {body.map((row, rowIndex) => (
-                        <View key={`row-${rowIndex}`} style={styles.row}>
-                            {row.map((cell, cellIndex) => (
-                                <View key={`cell-${rowIndex}-${cellIndex}`} style={styles.cell}>
-                                    <Text style={[styles.cellText, { color: colors.text }]}>{cell}</Text>
+                        <View key={`row-${rowIndex}`} style={[
+                            styles.row,
+                            { borderBottomWidth: rowIndex === body.length - 1 ? 0 : StyleSheet.hairlineWidth, borderBottomColor: colors.border }
+                        ]}>
+                            {row.map((cellText, cellIndex) => (
+                                <View key={`cell-${rowIndex}-${cellIndex}`} style={[
+                                    styles.cell,
+                                    { width: colWidths[cellIndex] }
+                                ]}>
+                                    <Text style={[styles.cellText, { color: colors.text }]}>
+                                        {renderInlineText(cellText)}
+                                    </Text>
                                 </View>
                             ))}
                         </View>
@@ -71,20 +119,20 @@ const styles = StyleSheet.create({
         marginVertical: 8,
         borderRadius: 8,
         overflow: 'hidden',
+        borderWidth: 1,
+        borderColor: 'transparent',
     },
-    scroll: {
+    tableContainer: {
         flexDirection: 'column',
+        alignItems: 'flex-start',
+        padding: 10
     },
     row: {
         flexDirection: 'row',
     },
-    headerRow: {
-        // Light background applied via inline style for dark/light mode
-    },
     cell: {
-        paddingVertical: 8,
+        paddingVertical: 10,
         paddingHorizontal: 12,
-        minWidth: 80,
         justifyContent: 'center',
     },
     headerText: {
@@ -93,6 +141,13 @@ const styles = StyleSheet.create({
     },
     cellText: {
         fontSize: 14,
+    },
+    inlineCode: {
+        fontFamily: 'monospace',
+        fontSize: 12,
+        paddingHorizontal: 4,
+        borderRadius: 4,
+        overflow: 'hidden',
     },
 });
 
