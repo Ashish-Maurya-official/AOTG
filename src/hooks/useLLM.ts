@@ -111,6 +111,20 @@ export const useLLM = (): UseLLMReturn => {
   }, []);
 
   const unloadModel = useCallback(async () => {
+    // Stop any active generation first before unloading
+    if (isGenerating) {
+      try {
+        await LLMService.stopGeneration();
+      } catch (_) {
+        // Ignore — we're unloading anyway
+      }
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
+      setIsGenerating(false);
+    }
+
     const success = await LLMService.unloadModel();
     if (success) {
       setIsLoaded(false);
@@ -119,7 +133,7 @@ export const useLLM = (): UseLLMReturn => {
       setStreamedText('');
     }
     return success;
-  }, []);
+  }, [isGenerating]);
 
   return {
     isLoaded,

@@ -527,9 +527,25 @@ class LLMModule(
     fun unloadModel(promise: Promise) {
         coroutineScope.launch {
             try {
+                // Step 1: Signal generation to stop
                 shouldStop.set(true)
-                generationJob?.cancel()
+
+                // Step 2: Cancel and wait for the generation job to finish
+                val job = generationJob
+                if (job != null && job.isActive) {
+                    job.cancel()
+                    try {
+                        withTimeout(3000L) {
+                            job.join()
+                        }
+                    } catch (e: TimeoutCancellationException) {
+                        Log.w(TAG, "Generation job did not finish within timeout, proceeding with unload")
+                    }
+                }
+                generationJob = null
                 isGenerating.set(false)
+
+                // Step 3: Now safe to close resources — generation is fully stopped
                 try {
                     conversation?.close()
                     engine?.close()

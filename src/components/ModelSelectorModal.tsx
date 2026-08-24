@@ -621,6 +621,8 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
             // Unload any currently loaded model first
             if (loadedModelId && loadedModelId !== model.id) {
                 try {
+                    // Stop any active generation before unloading
+                    await LLMService.stopGeneration().catch(() => {});
                     await LLMService.unloadModel();
                     dispatch(unloadModel());
                 } catch (err) {
@@ -629,6 +631,8 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
             } else if (loadedModelId === model.id) {
                 // Same model but reloading on different backend
                 try {
+                    // Stop any active generation before reloading
+                    await LLMService.stopGeneration().catch(() => {});
                     await LLMService.unloadModel();
                     dispatch(unloadModel());
                 } catch (err) {
@@ -678,6 +682,8 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     const handleUnload = useCallback(
         async () => {
             try {
+                // Stop any active generation before unloading
+                await LLMService.stopGeneration().catch(() => {});
                 await LLMService.unloadModel();
                 dispatch(unloadModel());
             } catch (err) {
@@ -847,7 +853,7 @@ const styles = StyleSheet.create({
         justifyContent: 'flex-end',
     },
     backdrop: {
-        ...StyleSheet.absoluteFillObject,
+        ...StyleSheet.absoluteFill,
         backgroundColor: 'rgba(0, 0, 0, 0.65)',
     },
     backdropPressable: {
