@@ -1,4 +1,4 @@
-import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+import { NativeEventEmitter, Platform } from 'react-native';
 import NativeLLM, {
   ModelStatusResult,
   InitializeResult,
@@ -47,8 +47,7 @@ class LLMServiceImpl {
   constructor() {
     if (Platform.OS === 'android') {
       try {
-        const module = NativeModules.LLM || NativeLLM;
-        this.eventEmitter = new NativeEventEmitter(module);
+        this.eventEmitter = new NativeEventEmitter(NativeLLM);
       } catch (err) {
         console.warn('[LLMService] Could not initialize NativeEventEmitter:', err);
       }

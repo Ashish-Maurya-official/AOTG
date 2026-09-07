@@ -3,14 +3,12 @@ package com.aotg.turbo_modules.llm
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.aotg.NativeLLMSpec
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import com.facebook.react.turbomodule.core.interfaces.TurboModule
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -29,7 +27,7 @@ import kotlinx.coroutines.flow.collect
 
 class LLMModule(
     private val reactContext: ReactApplicationContext
-) : ReactContextBaseJavaModule(reactContext), TurboModule {
+) : NativeLLMSpec(reactContext) {
 
     companion object {
         const val NAME = "LLM"
@@ -72,7 +70,6 @@ class LLMModule(
     // Active generation job for cancellation
     private var generationJob: Job? = null
 
-    override fun getName(): String = NAME
 
     /**
      * Gets or creates the local models directory
@@ -88,16 +85,14 @@ class LLMModule(
     /**
      * Return models directory path
      */
-    @ReactMethod
-    fun getModelsDirectory(promise: Promise) {
+    override fun getModelsDirectory(promise: Promise) {
         promise.resolve(getModelsDir().absolutePath)
     }
 
     /**
      * Check if a model file exists on disk
      */
-    @ReactMethod
-    fun checkModelStatus(fileName: String, promise: Promise) {
+    override fun checkModelStatus(fileName: String, promise: Promise) {
         try {
             val file = File(getModelsDir(), fileName)
             val exists = file.exists() && file.length() > 0
@@ -115,8 +110,7 @@ class LLMModule(
     /**
      * Delete a downloaded model file from local storage
      */
-    @ReactMethod
-    fun deleteDownloadedModel(fileName: String, promise: Promise) {
+    override fun deleteDownloadedModel(fileName: String, promise: Promise) {
         try {
             if (currentModelPath?.endsWith(fileName) == true) {
                 try {
@@ -144,8 +138,7 @@ class LLMModule(
     /**
      * Performs a real HTTP/HTTPS stream download from HuggingFace directly to device storage
      */
-    @ReactMethod
-    fun downloadModel(modelId: String, url: String, fileName: String, promise: Promise) {
+    override fun downloadModel(modelId: String, url: String, fileName: String, promise: Promise) {
         val cancelFlag = AtomicBoolean(false)
         activeDownloads[modelId] = cancelFlag
 
@@ -307,8 +300,7 @@ class LLMModule(
     /**
      * Cancel an ongoing model download
      */
-    @ReactMethod
-    fun cancelDownload(modelId: String, promise: Promise) {
+    override fun cancelDownload(modelId: String, promise: Promise) {
         val flag = activeDownloads[modelId]
         if (flag != null) {
             flag.set(true)
@@ -332,8 +324,7 @@ class LLMModule(
     /**
      * Real LiteRT-LM Initialization with NPU -> GPU -> CPU Fallback
      */
-    @ReactMethod
-    fun initialize(modelPath: String, backend: String, promise: Promise) {
+    override fun initialize(modelPath: String, backend: String, promise: Promise) {
         coroutineScope.launch {
             try {
                 val file = if (modelPath.startsWith("/") || modelPath.startsWith("file:")) {
@@ -432,8 +423,7 @@ class LLMModule(
     /**
      * Real LiteRT-LM Output Generation using streaming conversation
      */
-    @ReactMethod
-    fun startGeneration(prompt: String, promise: Promise) {
+    override fun startGeneration(prompt: String, promise: Promise) {
         val conv = conversation
         val eng = engine
         if (conv == null || eng == null || !isLoaded) {
@@ -497,8 +487,7 @@ class LLMModule(
     /**
      * Stop active generation immediately
      */
-    @ReactMethod
-    fun stopGeneration(promise: Promise) {
+    override fun stopGeneration(promise: Promise) {
         if (isGenerating.get()) {
             shouldStop.set(true)
             generationJob?.cancel()
@@ -515,16 +504,14 @@ class LLMModule(
     /**
      * Check whether model is currently loaded in memory
      */
-    @ReactMethod
-    fun isModelLoaded(promise: Promise) {
+    override fun isModelLoaded(promise: Promise) {
         promise.resolve(isLoaded && engine != null)
     }
 
     /**
      * Unload model from memory
      */
-    @ReactMethod
-    fun unloadModel(promise: Promise) {
+    override fun unloadModel(promise: Promise) {
         coroutineScope.launch {
             try {
                 // Step 1: Signal generation to stop
@@ -566,13 +553,11 @@ class LLMModule(
     /**
      * Event Listener Support for NativeEventEmitter
      */
-    @ReactMethod
-    fun addListener(eventName: String) {
+    override fun addListener(eventName: String) {
         listenerCount++
     }
 
-    @ReactMethod
-    fun removeListeners(count: Double) {
+    override fun removeListeners(count: Double) {
         listenerCount -= count.toInt()
         if (listenerCount < 0) listenerCount = 0
     }
