@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">AOTG</string>
+    <string name="accessibility_service_description">AOTG AI Agent uses this service to observe screen content, interact with apps, and automate tasks on your behalf using on-device AI. The agent can read UI elements, tap buttons, enter text, and navigate apps to complete your instructions.</string>
 </resources>

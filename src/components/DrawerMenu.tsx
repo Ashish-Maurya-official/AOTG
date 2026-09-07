@@ -35,12 +35,21 @@ const SettingsIcon = memo(({ color }: { color: string }) => (
     </View>
 ));
 
+const AgentIcon = memo(({ color }: { color: string }) => (
+    <View style={iconStyles.agentIconContainer}>
+        <View style={[iconStyles.agentCircle, { borderColor: color }]} />
+        <View style={[iconStyles.agentDotLeft, { backgroundColor: color }]} />
+        <View style={[iconStyles.agentDotRight, { backgroundColor: color }]} />
+    </View>
+));
+
 const { width, height } = Dimensions.get('window');
 const DRAWER_WIDTH = width * 0.75;
 
 interface DrawerMenuProps {
     isVisible: boolean;
     onClose: () => void;
+    onOpenAgent?: () => void;
 }
 
 const MOCK_CHATS = [
@@ -50,7 +59,7 @@ const MOCK_CHATS = [
     { id: '4', title: 'Explain Quantum Physics' },
 ];
 
-const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose }) => {
+const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose, onOpenAgent }) => {
     console.log('DrawerMenu rendered, isVisible:', isVisible);
     const { colors } = useTheme();
     const insets = useSafeAreaInsets();
@@ -151,6 +160,10 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose }) => {
 
                 {/* Footer */}
                 <View style={[styles.footer, { borderTopColor: colors.border }]}>
+                    <Pressable style={styles.footerItem} onPress={() => { onClose(); onOpenAgent?.(); }}>
+                        <AgentIcon color={colors.primary} />
+                        <Text style={[styles.footerText, { color: colors.primary }]}>Agent Mode</Text>
+                    </Pressable>
                     <Pressable style={styles.footerItem} onPress={onClose}>
                         <SettingsIcon color={colors.text} />
                         <Text style={[styles.footerText, { color: colors.text }]}>Settings</Text>
@@ -301,7 +314,35 @@ const iconStyles = StyleSheet.create({
         width: 6,
         height: 6,
         borderRadius: 3,
-    }
+    },
+    agentIconContainer: {
+        width: 22,
+        height: 22,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    agentCircle: {
+        width: 18,
+        height: 18,
+        borderRadius: 9,
+        borderWidth: 2,
+    },
+    agentDotLeft: {
+        position: 'absolute',
+        width: 4,
+        height: 4,
+        borderRadius: 2,
+        left: 5,
+        top: 7,
+    },
+    agentDotRight: {
+        position: 'absolute',
+        width: 4,
+        height: 4,
+        borderRadius: 2,
+        right: 5,
+        top: 7,
+    },
 });
 
 export default memo(DrawerMenu);

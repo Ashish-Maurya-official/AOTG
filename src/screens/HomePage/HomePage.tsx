@@ -132,7 +132,7 @@ const HeadphoneIcon = memo(({ color }: { color: string }) => (
     </View>
 ));
 
-const HomePage = () => {
+const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const theme = useTheme();
     const { colors } = theme;
     const insets = useSafeAreaInsets();
@@ -575,6 +575,7 @@ const HomePage = () => {
             <DrawerMenu
                 isVisible={isDrawerVisible}
                 onClose={() => setIsDrawerVisible(false)}
+                onOpenAgent={onOpenAgent}
             />
         </View>
     );

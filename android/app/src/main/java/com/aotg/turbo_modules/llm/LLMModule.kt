@@ -13,6 +13,8 @@ import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -485,8 +487,83 @@ class LLMModule(
     }
 
     /**
-     * Stop active generation immediately
+     * Multimodal generation — sends a screenshot image + text prompt to a vision-capable
+     * LiteRT-LM model (e.g. PaliGemma, Gemma 3n, InternVL3).
+     *
+     * The [imagePath] must be an absolute path to a JPEG or PNG file on the device.
+     * Falls back to text-only generation if the image file is missing or the model
+     * doesn't support vision.
      */
+    override fun startGenerationWithImage(prompt: String, imagePath: String, promise: Promise) {
+        val conv = conversation
+        val eng = engine
+        if (conv == null || eng == null || !isLoaded) {
+            promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model loaded. Please load a model first.")
+            return
+        }
+
+        if (isGenerating.get()) {
+            promise.reject("ERR_ALREADY_GENERATING", "Model is already generating a response.")
+            return
+        }
+
+        isGenerating.set(true)
+        shouldStop.set(false)
+        accumulatedResponse.setLength(0)
+        promise.resolve(true)
+
+        generationJob = coroutineScope.launch {
+            try {
+                val imageFile = File(imagePath)
+                val contents = if (imageFile.exists() && imageFile.length() > 0) {
+                    Log.d(TAG, "Vision inference: using image ${imageFile.absolutePath} (${imageFile.length()} bytes)")
+                    Contents.of(
+                        Content.ImageFile(imageFile.absolutePath),
+                        Content.Text(prompt)
+                    )
+                } else {
+                    // Graceful fallback to text-only if image is missing
+                    Log.w(TAG, "Vision fallback: image not found at $imagePath — using text only")
+                    Contents.of(Content.Text(prompt))
+                }
+
+                conv.sendMessageAsync(contents).collect { message ->
+                    val chunkText = message.toString()
+                    if (shouldStop.get() || chunkText.isEmpty()) return@collect
+
+                    accumulatedResponse.append(chunkText)
+
+                    val tokenMap = Arguments.createMap().apply {
+                        putString("token", chunkText)
+                        putString("text", accumulatedResponse.toString())
+                        putBoolean("isFinished", false)
+                    }
+                    sendEvent(EVENT_ON_TOKEN, tokenMap)
+                }
+
+                if (!shouldStop.get()) {
+                    val completeMap = Arguments.createMap().apply {
+                        putString("fullText", accumulatedResponse.toString())
+                        putBoolean("isFinished", true)
+                    }
+                    sendEvent(EVENT_ON_GENERATION_COMPLETE, completeMap)
+                }
+                isGenerating.set(false)
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Vision generation cancelled")
+                isGenerating.set(false)
+            } catch (e: Exception) {
+                Log.e(TAG, "Vision generation failed: ${e.message}", e)
+                isGenerating.set(false)
+                val errMap = Arguments.createMap().apply {
+                    putString("error", e.message ?: "Unknown vision generation error")
+                }
+                sendEvent(EVENT_ON_GENERATION_ERROR, errMap)
+            }
+        }
+    }
+
+
     override fun stopGeneration(promise: Promise) {
         if (isGenerating.get()) {
             shouldStop.set(true)

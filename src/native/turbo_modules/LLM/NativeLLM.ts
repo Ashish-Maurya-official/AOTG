@@ -23,7 +23,10 @@ export interface Spec extends TurboModule {
   getModelsDirectory(): Promise<string>;
 
   initialize(modelPath: string, backend: string): Promise<InitializeResult>;
+  /** Text-only generation */
   startGeneration(prompt: string): Promise<boolean>;
+  /** Multimodal generation with optional image — imagePath is an absolute file path on device */
+  startGenerationWithImage(prompt: string, imagePath: string): Promise<boolean>;
   stopGeneration(): Promise<boolean>;
   isModelLoaded(): Promise<boolean>;
   unloadModel(): Promise<boolean>;

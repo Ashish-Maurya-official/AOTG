@@ -254,6 +254,51 @@ class LLMServiceImpl {
   }
 
   /**
+   * Multimodal generation — passes a screenshot image + text prompt to a
+   * vision-capable LiteRT-LM model (e.g. PaliGemma, Gemma 3n, InternVL3).
+   *
+   * @param prompt     The text prompt describing what to decide/reason about
+   * @param imagePath  Absolute path to a JPEG/PNG screenshot on the device
+   * @param onStream   Optional callback for streaming tokens as they arrive
+   */
+  public generateWithVision(
+    prompt: string,
+    imagePath: string,
+    onStream?: (chunk: string) => void
+  ): Promise<string> {
+    return new Promise(async (resolve, reject) => {
+      const subscriptions: {remove: () => void}[] = [];
+
+      if (this.eventEmitter) {
+        subscriptions.push(
+          this.eventEmitter.addListener('onToken', (data: any) => {
+            if (onStream) onStream(data.token);
+          })
+        );
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
+            subscriptions.forEach(s => s.remove());
+            resolve(data.fullText);
+          })
+        );
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationError', (data: any) => {
+            subscriptions.forEach(s => s.remove());
+            reject(new Error(data.error));
+          })
+        );
+      }
+
+      try {
+        await NativeLLM.startGenerationWithImage(prompt, imagePath);
+      } catch (err) {
+        subscriptions.forEach(s => s.remove());
+        reject(err);
+      }
+    });
+  }
+
+  /**
    * Immediately stops active token generation
    */
   public async stopGeneration(): Promise<boolean> {
