@@ -50,6 +50,7 @@ interface DrawerMenuProps {
     isVisible: boolean;
     onClose: () => void;
     onOpenAgent?: () => void;
+    onNewChat?: () => void;
 }
 
 const MOCK_CHATS = [
@@ -59,7 +60,7 @@ const MOCK_CHATS = [
     { id: '4', title: 'Explain Quantum Physics' },
 ];
 
-const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose, onOpenAgent }) => {
+const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose, onOpenAgent, onNewChat }) => {
     console.log('DrawerMenu rendered, isVisible:', isVisible);
     const { colors } = useTheme();
     const insets = useSafeAreaInsets();
@@ -131,7 +132,7 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({ isVisible, onClose, onOpenAgent
                 <View style={styles.header}>
                     <Pressable
                         style={[styles.newChatBtn, { backgroundColor: colors.background, borderColor: colors.border }]}
-                        onPress={onClose}>
+                        onPress={() => { onClose(); onNewChat?.(); }}>
                         <PlusIcon color={colors.text} />
                         <Text style={[styles.newChatText, { color: colors.text }]}>
                             New Chat

@@ -19,7 +19,10 @@ import type {
 import {DEFAULT_AGENT_CONFIG} from './types';
 import {buildActionPrompt, parseActionResponse} from './promptBuilder';
 import AccessibilityService from '../services/accessibilityService';
-import LLMService from '../services/llmService';
+import LLMService, {estimateTokens} from '../services/llmService';
+
+/** Smallest screen dump we are willing to send before dropping conversation history. */
+const MIN_ELEMENTS_IN_PROMPT = 5;
 
 class AccessibilityAgentImpl implements Agent {
   readonly id = 'accessibility-agent';
@@ -183,13 +186,42 @@ class AccessibilityAgentImpl implements Agent {
           }
 
           const useVision = screenshotPath != null;
-          const prompt = buildActionPrompt(
+
+          // ── Context-window budgeting ──
+          // The conversation's KV cache grows with every step. Shrink the screen
+          // dump to fit what's left; only when even the smallest prompt cannot
+          // fit do we drop the history (the only way to free KV memory).
+          const remaining = await LLMService.getRemainingContextTokens();
+          const visionOverhead = useVision ? 512 : 0;
+          let maxElements = config.maxElementsInPrompt;
+          let prompt = buildActionPrompt(
             instruction,
             step.observation!,
             steps,
-            config,
+            {...config, maxElementsInPrompt: maxElements},
             useVision,
           );
+          while (
+            estimateTokens(prompt) + visionOverhead > remaining &&
+            maxElements > MIN_ELEMENTS_IN_PROMPT
+          ) {
+            maxElements = Math.max(MIN_ELEMENTS_IN_PROMPT, Math.floor(maxElements / 2));
+            prompt = buildActionPrompt(
+              instruction,
+              step.observation!,
+              steps,
+              {...config, maxElementsInPrompt: maxElements},
+              useVision,
+            );
+          }
+          if (estimateTokens(prompt) + visionOverhead > remaining) {
+            console.warn('[Agent] Context window exhausted — resetting conversation before step', stepIndex);
+            await LLMService.resetConversation();
+            maxElements = config.maxElementsInPrompt;
+            prompt = buildActionPrompt(instruction, step.observation!, steps, config, useVision);
+          } else if (maxElements !== config.maxElementsInPrompt) {
+            console.log(`[Agent] Trimmed screen dump to ${maxElements} elements to fit context`);
+          }
 
           const onToken = (token: string) => {
             step.rawThinking += token;

@@ -2,7 +2,19 @@ import { NativeEventEmitter, Platform } from 'react-native';
 import NativeLLM, {
   ModelStatusResult,
   InitializeResult,
+  ContextUsage,
 } from '../native/turbo_modules/LLM/NativeLLM';
+
+export type { ContextUsage };
+
+/**
+ * Conservative chars→tokens estimate for on-device tokenizers. JSON-heavy
+ * prompts (accessibility trees) tokenize densely, so ~3.2 chars/token.
+ */
+export const estimateTokens = (text: string): number => Math.ceil(text.length / 3.2);
+
+/** Tokens kept free for the model's own answer on every turn. */
+export const RESPONSE_RESERVE_TOKENS = 512;
 
 export interface TokenEvent {
   token: string;
@@ -319,6 +331,65 @@ class LLMServiceImpl {
     } catch (err) {
       return false;
     }
+  }
+
+  /**
+   * True while the model is actively decoding a response
+   */
+  public async isGenerating(): Promise<boolean> {
+    try {
+      return await NativeLLM.isGenerating();
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /**
+   * KV-cache usage of the live conversation
+   */
+  public async getContextUsage(): Promise<ContextUsage> {
+    try {
+      return await NativeLLM.getContextUsage();
+    } catch (err) {
+      return { tokenCount: 0, maxTokens: 0, isLoaded: false };
+    }
+  }
+
+  /**
+   * Tokens still available for the NEXT prompt, after keeping room for the answer.
+   * Returns Infinity when no model is loaded (nothing to budget against).
+   */
+  public async getRemainingContextTokens(): Promise<number> {
+    const usage = await this.getContextUsage();
+    if (!usage.isLoaded || usage.maxTokens <= 0) return Number.POSITIVE_INFINITY;
+    return Math.max(0, usage.maxTokens - usage.tokenCount - RESPONSE_RESERVE_TOKENS);
+  }
+
+  /**
+   * Drops the conversation history / KV cache and starts a fresh one on the same engine
+   */
+  public async resetConversation(): Promise<boolean> {
+    try {
+      return await NativeLLM.resetConversation();
+    } catch (err) {
+      console.error('[LLMService] resetConversation error:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Guarantees a prompt of `promptTokens` fits in the live conversation. When the
+   * accumulated KV cache leaves too little room, the conversation is reset (this is
+   * the only way to free KV memory). Returns true when a reset happened so callers
+   * can inform the user.
+   */
+  public async ensureContextBudget(promptTokens: number): Promise<boolean> {
+    const remaining = await this.getRemainingContextTokens();
+    if (promptTokens <= remaining) return false;
+    console.warn(
+      `[LLMService] Context nearly full (need ${promptTokens}, have ${remaining}) — resetting conversation`
+    );
+    return this.resetConversation();
   }
 
   /**

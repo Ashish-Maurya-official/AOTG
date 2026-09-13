@@ -1,5 +1,6 @@
 package com.aotg.turbo_modules.llm
 
+import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -26,6 +27,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class LLMModule(
     private val reactContext: ReactApplicationContext
@@ -34,6 +37,15 @@ class LLMModule(
     companion object {
         const val NAME = "LLM"
         private const val TAG = "LLMModule"
+
+        /**
+         * Hard cap on the KV-cache (prompt + response tokens) per conversation.
+         * Bounds native memory and lets JS reason about remaining context budget.
+         */
+        private const val MAX_NUM_TOKENS = 4096
+
+        /** How long to wait for native inference to wind down after cancelProcess(). */
+        private const val STOP_TIMEOUT_MS = 8000L
 
         // Event Names
         const val EVENT_ON_TOKEN = "onToken"
@@ -52,26 +64,127 @@ class LLMModule(
     private val executor: ExecutorService = Executors.newCachedThreadPool()
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val isGenerating = AtomicBoolean(false)
-    private val shouldStop = AtomicBoolean(false)
+
+    /**
+     * One in-flight generation. Each run owns its own stop flag + buffer so a
+     * stopped run that is still winding down natively can never leak tokens
+     * into the next run.
+     */
+    private class GenerationSession {
+        val stop = AtomicBoolean(false)
+        val text = StringBuilder()
+        var job: Job? = null
+    }
+
+    @Volatile private var currentSession: GenerationSession? = null
 
     // Real LiteRT-LM engine
-    private var engine: Engine? = null
-    private var conversation: Conversation? = null
-    private val accumulatedResponse = StringBuilder()
+    @Volatile private var engine: Engine? = null
+    @Volatile private var conversation: Conversation? = null
+
+    /** Serializes every engine lifecycle operation (load / unload / delete / reset). */
+    private val lifecycleMutex = Mutex()
+    private val isInitializing = AtomicBoolean(false)
 
     // Active Downloads tracker: modelId -> cancellation flag
     private val activeDownloads = ConcurrentHashMap<String, AtomicBoolean>()
 
-    private var isLoaded: Boolean = false
-    private var currentModelPath: String? = null
+    @Volatile private var isLoaded: Boolean = false
+    @Volatile private var currentModelPath: String? = null
     private var currentBackend: String = "AUTO"
-    private var activeBackend: String = "CPU"
+    @Volatile private var activeBackend: String = "CPU"
     private var listenerCount = 0
 
-    // Active generation job for cancellation
-    private var generationJob: Job? = null
+    /** True while a generation job is alive (including the wind-down after a stop). */
+    private fun isGenerationActive(): Boolean = currentSession?.job?.isActive == true
 
+    /** True while a generation is running and has NOT been asked to stop. */
+    private fun isGenerationBusy(): Boolean {
+        val s = currentSession ?: return false
+        return s.job?.isActive == true && !s.stop.get()
+    }
+
+    /**
+     * Ask the native runtime to stop decoding and wait until the generation job
+     * has fully finished. Only after this returns is it safe to close the
+     * conversation/engine (closing mid-inference is a native SIGSEGV).
+     */
+    private suspend fun stopGenerationAndAwait(timeoutMs: Long = STOP_TIMEOUT_MS): Boolean {
+        val session = currentSession ?: return true
+        val job = session.job
+        if (job == null || !job.isActive) return true
+
+        session.stop.set(true)
+        var finished = false
+        // Two attempts: the first cancelProcess() can land before the native
+        // session has started prefill (tiny window) and be missed.
+        for (attempt in 1..2) {
+            try {
+                conversation?.let { if (it.isAlive) it.cancelProcess() }
+            } catch (t: Throwable) {
+                Log.w(TAG, "cancelProcess failed (attempt $attempt): ${t.message}")
+            }
+            finished = withTimeoutOrNull(timeoutMs / 2) { job.join() } != null
+            if (finished) break
+        }
+        if (!finished) {
+            Log.w(TAG, "Generation did not stop within ${timeoutMs}ms — force-cancelling job")
+            job.cancel()
+            withTimeoutOrNull(1000L) { job.join() }
+        }
+        return finished
+    }
+
+    private fun closeConversationSafely() {
+        val conv = conversation
+        conversation = null
+        if (conv == null) return
+        try {
+            if (conv.isAlive) conv.close()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Error closing conversation: ${t.message}")
+        }
+    }
+
+    private fun closeEngineSafely(target: Engine? = engine) {
+        if (target === engine) engine = null
+        if (target == null) return
+        try {
+            if (target.isInitialized()) target.close()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Error closing engine: ${t.message}")
+        }
+    }
+
+    /**
+     * Releases conversation + engine independently (a failure in one must never
+     * leak the other) and resets all in-memory state. Must be called with the
+     * lifecycle mutex held and with no generation running.
+     */
+    private fun releaseEngineResources() {
+        val before = Debug.getNativeHeapAllocatedSize()
+        closeConversationSafely()
+        closeEngineSafely()
+        isLoaded = false
+        currentModelPath = null
+        activeBackend = "CPU"
+        currentSession = null
+        val after = Debug.getNativeHeapAllocatedSize()
+        Log.i(TAG, "Engine released. Native heap: ${before / 1048576} MB -> ${after / 1048576} MB")
+    }
+
+    /** Called by React Native when the module/bridge is torn down (e.g. dev reload). */
+    override fun invalidate() {
+        try {
+            runBlocking { withTimeoutOrNull(4000L) { stopGenerationAndAwait(3000L) } }
+            releaseEngineResources()
+        } catch (t: Throwable) {
+            Log.w(TAG, "invalidate cleanup failed: ${t.message}")
+        }
+        coroutineScope.cancel()
+        executor.shutdownNow()
+        super.invalidate()
+    }
 
     /**
      * Gets or creates the local models directory
@@ -110,30 +223,30 @@ class LLMModule(
     }
 
     /**
-     * Delete a downloaded model file from local storage
+     * Delete a downloaded model file from local storage.
+     * If the file backs the currently loaded engine, the engine is unloaded first
+     * (serialized with any other lifecycle operation) so we never delete a
+     * memory-mapped file under a live engine.
      */
     override fun deleteDownloadedModel(fileName: String, promise: Promise) {
-        try {
-            if (currentModelPath?.endsWith(fileName) == true) {
-                try {
-                    conversation?.close()
-                    engine?.close()
-                } catch (_: Exception) {}
-                conversation = null
-                engine = null
-                isLoaded = false
-                currentModelPath = null
-            }
+        coroutineScope.launch {
+            try {
+                lifecycleMutex.withLock {
+                    if (currentModelPath?.endsWith(fileName) == true) {
+                        stopGenerationAndAwait()
+                        releaseEngineResources()
+                    }
 
-            val file = File(getModelsDir(), fileName)
-            if (file.exists()) {
-                val deleted = file.delete()
-                promise.resolve(deleted)
-            } else {
-                promise.resolve(true)
+                    val file = File(getModelsDir(), fileName)
+                    if (file.exists()) {
+                        promise.resolve(file.delete())
+                    } else {
+                        promise.resolve(true)
+                    }
+                }
+            } catch (e: Exception) {
+                promise.reject("ERR_DELETE_MODEL", e.message, e)
             }
-        } catch (e: Exception) {
-            promise.reject("ERR_DELETE_MODEL", e.message, e)
         }
     }
 
@@ -324,100 +437,209 @@ class LLMModule(
     }
 
     /**
-     * Real LiteRT-LM Initialization with NPU -> GPU -> CPU Fallback
+     * Real LiteRT-LM Initialization with backend fallback.
+     *
+     * Fallback chains:
+     *  - NPU  → NPU, GPU, CPU   (explicit user choice; NPU needs an NPU-compiled model + vendor libs)
+     *  - GPU  → GPU, CPU
+     *  - CPU  → CPU
+     *  - AUTO → GPU, CPU        (catalog models are CPU/GPU builds — an NPU attempt would always fail)
+     *
+     * Every lifecycle operation is serialized through [lifecycleMutex]; a second
+     * load request while one is in flight is rejected with ERR_BUSY instead of
+     * racing the native runtime.
      */
     override fun initialize(modelPath: String, backend: String, promise: Promise) {
+        if (!isInitializing.compareAndSet(false, true)) {
+            promise.reject("ERR_BUSY", "A model is already being loaded. Please wait for it to finish.")
+            return
+        }
+
         coroutineScope.launch {
             try {
-                val file = if (modelPath.startsWith("/") || modelPath.startsWith("file:")) {
-                    File(modelPath.removePrefix("file://"))
-                } else {
-                    File(getModelsDir(), modelPath)
-                }
-
-                Log.d(TAG, "Requesting initialization for: ${file.absolutePath} with requested backend: $backend")
-
-                if (!file.exists() || file.length() == 0L) {
-                    throw Exception("Model file does not exist at ${file.absolutePath}. Please download the model first.")
-                }
-
-                // Close any existing engine
-                try {
-                    conversation?.close()
-                    engine?.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error closing previous engine: ${e.message}")
-                }
-                conversation = null
-                engine = null
-
-                // Determine fallback chain based on user preference
-                val backendChain = when (backend.uppercase()) {
-                    "NPU" -> listOf("NPU", "GPU", "CPU")
-                    "GPU" -> listOf("GPU", "CPU")
-                    "CPU" -> listOf("CPU")
-                    else -> listOf("NPU", "GPU", "CPU") // AUTO: try all backends
-                }
-
-                var initializedEngine: Engine? = null
-                var successfulBackend: String? = null
-                var lastInitError: Throwable? = null
-
-                for (targetBackend in backendChain) {
-                    try {
-                        Log.d(TAG, "Attempting LiteRT-LM initialization on backend: $targetBackend...")
-
-                        val backendInstance = createBackend(targetBackend)
-                        val config = EngineConfig(
-                            modelPath = file.absolutePath,
-                            backend = backendInstance
-                        )
-
-                        val eng = Engine(config)
-                        eng.initialize()
-
-                        initializedEngine = eng
-                        successfulBackend = targetBackend
-                        Log.i(TAG, "Successfully initialized LiteRT-LM on $targetBackend!")
-                        break
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "Backend $targetBackend failed: ${t.message}", t)
-                        lastInitError = t
+                lifecycleMutex.withLock {
+                    val file = if (modelPath.startsWith("/") || modelPath.startsWith("file:")) {
+                        File(modelPath.removePrefix("file://"))
+                    } else {
+                        File(getModelsDir(), modelPath)
                     }
+
+                    Log.d(TAG, "Requesting initialization for: ${file.absolutePath} with requested backend: $backend")
+
+                    if (!file.exists() || file.length() == 0L) {
+                        throw Exception("Model file does not exist at ${file.absolutePath}. Please download the model first.")
+                    }
+
+                    // Make sure nothing is decoding, then free the previous engine
+                    // completely BEFORE allocating the new one (models are 2–4 GB).
+                    stopGenerationAndAwait()
+                    releaseEngineResources()
+
+                    val backendChain = when (backend.uppercase()) {
+                        "NPU" -> listOf("NPU", "GPU", "CPU")
+                        "GPU" -> listOf("GPU", "CPU")
+                        "CPU" -> listOf("CPU")
+                        else -> listOf("GPU", "CPU")
+                    }
+
+                    var initializedEngine: Engine? = null
+                    var successfulBackend: String? = null
+                    var lastInitError: Throwable? = null
+
+                    for (targetBackend in backendChain) {
+                        var eng: Engine? = null
+                        try {
+                            Log.d(TAG, "Attempting LiteRT-LM initialization on backend: $targetBackend...")
+                            val config = EngineConfig(
+                                modelPath = file.absolutePath,
+                                backend = createBackend(targetBackend),
+                                maxNumTokens = MAX_NUM_TOKENS
+                            )
+                            eng = Engine(config)
+                            eng.initialize()
+
+                            initializedEngine = eng
+                            successfulBackend = targetBackend
+                            Log.i(TAG, "Successfully initialized LiteRT-LM on $targetBackend!")
+                            break
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "Backend $targetBackend failed: ${t.message}", t)
+                            lastInitError = t
+                            // Never leak a partially-initialized engine into the next attempt.
+                            closeEngineSafely(eng)
+                        }
+                    }
+
+                    if (initializedEngine == null || successfulBackend == null) {
+                        val errorDetail = lastInitError?.message ?: lastInitError?.javaClass?.simpleName ?: "Unknown error"
+                        throw Exception("Failed to initialize on backends (${backendChain.joinToString(", ")}): $errorDetail")
+                    }
+
+                    val conv = try {
+                        initializedEngine.createConversation()
+                    } catch (t: Throwable) {
+                        closeEngineSafely(initializedEngine)
+                        throw Exception("Engine loaded on $successfulBackend but conversation could not be created: ${t.message}", t)
+                    }
+
+                    engine = initializedEngine
+                    conversation = conv
+                    currentModelPath = file.absolutePath
+                    currentBackend = backend
+                    activeBackend = successfulBackend
+                    isLoaded = true
+
+                    val wasFallback = !successfulBackend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
+
+                    val params = Arguments.createMap().apply {
+                        putBoolean("success", true)
+                        putString("modelPath", file.absolutePath)
+                        putString("requestedBackend", backend)
+                        putString("actualBackend", successfulBackend)
+                        putBoolean("wasFallback", wasFallback)
+                    }
+
+                    Log.i(TAG, "Model loaded. Native heap: ${Debug.getNativeHeapAllocatedSize() / 1048576} MB")
+                    sendEvent(EVENT_ON_MODEL_LOADED, params)
+                    promise.resolve(params)
                 }
-
-                if (initializedEngine == null || successfulBackend == null) {
-                    val errorDetail = lastInitError?.message ?: lastInitError?.javaClass?.simpleName ?: "Unknown error"
-                    throw Exception("Failed to initialize on backends (${backendChain.joinToString(", ")}): $errorDetail")
-                }
-
-                engine = initializedEngine
-                currentModelPath = file.absolutePath
-                currentBackend = backend
-                activeBackend = successfulBackend
-                isLoaded = true
-
-                // Create initial conversation
-                conversation = initializedEngine.createConversation()
-
-                val wasFallback = !successfulBackend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
-
-                val params = Arguments.createMap().apply {
-                    putBoolean("success", true)
-                    putString("modelPath", file.absolutePath)
-                    putString("requestedBackend", backend)
-                    putString("actualBackend", successfulBackend)
-                    putBoolean("wasFallback", wasFallback)
-                }
-
-                sendEvent(EVENT_ON_MODEL_LOADED, params)
-                promise.resolve(params)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize LiteRT-LM model: ${e.message}", e)
                 isLoaded = false
-                engine = null
-                conversation = null
+                currentModelPath = null
                 promise.reject("ERR_MODEL_INIT", "Initialization failed: ${e.message}", e)
+            } finally {
+                isInitializing.set(false)
+            }
+        }
+    }
+
+    /**
+     * Shared generation runner for text and multimodal prompts.
+     *
+     * - Rejects if a generation is actively running (not yet asked to stop).
+     * - If the previous run was stopped but is still winding down natively, the
+     *   new run waits for it to finish first instead of overlapping two decodes.
+     * - Each run owns its own [GenerationSession] so late tokens from a stopped
+     *   run can never leak into this one.
+     */
+    private fun startGenerationInternal(buildContents: () -> Contents, promise: Promise) {
+        if (conversation == null || engine == null || !isLoaded) {
+            promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model is currently loaded in memory. Please download and load a model first.")
+            return
+        }
+
+        if (isInitializing.get()) {
+            promise.reject("ERR_BUSY", "A model is currently being loaded. Please wait.")
+            return
+        }
+
+        if (isGenerationBusy()) {
+            promise.reject("ERR_ALREADY_GENERATING", "Model is already generating a response.")
+            return
+        }
+
+        val previous = currentSession
+        val session = GenerationSession()
+        currentSession = session
+        promise.resolve(true)
+
+        session.job = coroutineScope.launch {
+            try {
+                // Let a stopped-but-still-decoding previous run finish natively.
+                val prevJob = previous?.job
+                if (prevJob != null && prevJob.isActive) {
+                    val done = withTimeoutOrNull(STOP_TIMEOUT_MS) { prevJob.join() } != null
+                    if (!done) {
+                        throw IllegalStateException("Previous generation did not stop in time. Please try again.")
+                    }
+                }
+
+                if (session.stop.get()) return@launch
+
+                val conv = conversation
+                if (conv == null || !conv.isAlive || !isLoaded) {
+                    throw IllegalStateException("Model was unloaded before generation could start.")
+                }
+
+                Log.d(TAG, "Executing LiteRT-LM inference on backend: $activeBackend")
+
+                conv.sendMessageAsync(buildContents()).collect { message ->
+                    val chunkText = message.toString()
+                    if (session.stop.get() || chunkText.isEmpty()) {
+                        return@collect
+                    }
+
+                    session.text.append(chunkText)
+
+                    val tokenMap = Arguments.createMap().apply {
+                        putString("token", chunkText)
+                        putString("text", session.text.toString())
+                        putBoolean("isFinished", false)
+                    }
+                    sendEvent(EVENT_ON_TOKEN, tokenMap)
+                }
+
+                // Natural completion. (After a stop, stopGeneration() already
+                // emitted the terminal events with the partial text.)
+                if (!session.stop.get()) {
+                    sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
+                        putString("fullText", session.text.toString())
+                        putBoolean("isFinished", true)
+                    })
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Generation coroutine cancelled")
+            } catch (t: Throwable) {
+                if (session.stop.get()) {
+                    // Errors surfacing while winding down after cancelProcess() are expected.
+                    Log.d(TAG, "Ignoring post-stop generation error: ${t.message}")
+                } else {
+                    Log.e(TAG, "Generation failed: ${t.message}", t)
+                    sendEvent(EVENT_ON_GENERATION_ERROR, Arguments.createMap().apply {
+                        putString("error", t.message ?: "Unknown LiteRT-LM generation error")
+                    })
+                }
             }
         }
     }
@@ -426,64 +648,7 @@ class LLMModule(
      * Real LiteRT-LM Output Generation using streaming conversation
      */
     override fun startGeneration(prompt: String, promise: Promise) {
-        val conv = conversation
-        val eng = engine
-        if (conv == null || eng == null || !isLoaded) {
-            promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model is currently loaded in memory. Please download and load a model first.")
-            return
-        }
-
-        if (isGenerating.get()) {
-            promise.reject("ERR_ALREADY_GENERATING", "Model is already generating a response.")
-            return
-        }
-
-        isGenerating.set(true)
-        shouldStop.set(false)
-        accumulatedResponse.setLength(0)
-        promise.resolve(true)
-
-        generationJob = coroutineScope.launch {
-            try {
-                Log.d(TAG, "Executing real LiteRT-LM inference on backend: $activeBackend for prompt: $prompt")
-
-                conv.sendMessageAsync(prompt).collect { message ->
-                    val chunkText = message.toString()
-                    if (shouldStop.get() || chunkText.isEmpty()) {
-                        return@collect
-                    }
-
-                    accumulatedResponse.append(chunkText)
-
-                    val tokenMap = Arguments.createMap().apply {
-                        putString("token", chunkText)
-                        putString("text", accumulatedResponse.toString())
-                        putBoolean("isFinished", false)
-                    }
-                    sendEvent(EVENT_ON_TOKEN, tokenMap)
-                }
-
-                // Generation completed
-                if (!shouldStop.get()) {
-                    val completeMap = Arguments.createMap().apply {
-                        putString("fullText", accumulatedResponse.toString())
-                        putBoolean("isFinished", true)
-                    }
-                    sendEvent(EVENT_ON_GENERATION_COMPLETE, completeMap)
-                }
-                isGenerating.set(false)
-            } catch (e: CancellationException) {
-                Log.d(TAG, "Generation was cancelled")
-                isGenerating.set(false)
-            } catch (e: Exception) {
-                Log.e(TAG, "Real generation execution failed: ${e.message}", e)
-                isGenerating.set(false)
-                val errMap = Arguments.createMap().apply {
-                    putString("error", e.message ?: "Unknown LiteRT-LM generation error")
-                }
-                sendEvent(EVENT_ON_GENERATION_ERROR, errMap)
-            }
-        }
+        startGenerationInternal({ Contents.of(Content.Text(prompt)) }, promise)
     }
 
     /**
@@ -491,144 +656,131 @@ class LLMModule(
      * LiteRT-LM model (e.g. PaliGemma, Gemma 3n, InternVL3).
      *
      * The [imagePath] must be an absolute path to a JPEG or PNG file on the device.
-     * Falls back to text-only generation if the image file is missing or the model
-     * doesn't support vision.
+     * Falls back to text-only generation if the image file is missing.
      */
     override fun startGenerationWithImage(prompt: String, imagePath: String, promise: Promise) {
-        val conv = conversation
-        val eng = engine
-        if (conv == null || eng == null || !isLoaded) {
-            promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model loaded. Please load a model first.")
-            return
-        }
-
-        if (isGenerating.get()) {
-            promise.reject("ERR_ALREADY_GENERATING", "Model is already generating a response.")
-            return
-        }
-
-        isGenerating.set(true)
-        shouldStop.set(false)
-        accumulatedResponse.setLength(0)
-        promise.resolve(true)
-
-        generationJob = coroutineScope.launch {
-            try {
-                val imageFile = File(imagePath)
-                val contents = if (imageFile.exists() && imageFile.length() > 0) {
-                    Log.d(TAG, "Vision inference: using image ${imageFile.absolutePath} (${imageFile.length()} bytes)")
-                    Contents.of(
-                        Content.ImageFile(imageFile.absolutePath),
-                        Content.Text(prompt)
-                    )
-                } else {
-                    // Graceful fallback to text-only if image is missing
-                    Log.w(TAG, "Vision fallback: image not found at $imagePath — using text only")
-                    Contents.of(Content.Text(prompt))
-                }
-
-                conv.sendMessageAsync(contents).collect { message ->
-                    val chunkText = message.toString()
-                    if (shouldStop.get() || chunkText.isEmpty()) return@collect
-
-                    accumulatedResponse.append(chunkText)
-
-                    val tokenMap = Arguments.createMap().apply {
-                        putString("token", chunkText)
-                        putString("text", accumulatedResponse.toString())
-                        putBoolean("isFinished", false)
-                    }
-                    sendEvent(EVENT_ON_TOKEN, tokenMap)
-                }
-
-                if (!shouldStop.get()) {
-                    val completeMap = Arguments.createMap().apply {
-                        putString("fullText", accumulatedResponse.toString())
-                        putBoolean("isFinished", true)
-                    }
-                    sendEvent(EVENT_ON_GENERATION_COMPLETE, completeMap)
-                }
-                isGenerating.set(false)
-            } catch (e: CancellationException) {
-                Log.d(TAG, "Vision generation cancelled")
-                isGenerating.set(false)
-            } catch (e: Exception) {
-                Log.e(TAG, "Vision generation failed: ${e.message}", e)
-                isGenerating.set(false)
-                val errMap = Arguments.createMap().apply {
-                    putString("error", e.message ?: "Unknown vision generation error")
-                }
-                sendEvent(EVENT_ON_GENERATION_ERROR, errMap)
+        startGenerationInternal({
+            val imageFile = File(imagePath)
+            if (imageFile.exists() && imageFile.length() > 0) {
+                Log.d(TAG, "Vision inference: using image ${imageFile.absolutePath} (${imageFile.length()} bytes)")
+                Contents.of(
+                    Content.ImageFile(imageFile.absolutePath),
+                    Content.Text(prompt)
+                )
+            } else {
+                Log.w(TAG, "Vision fallback: image not found at $imagePath — using text only")
+                Contents.of(Content.Text(prompt))
             }
-        }
+        }, promise)
     }
 
-
+    /**
+     * Stops the active generation. Signals the native runtime via cancelProcess()
+     * (so it really stops decoding, instead of only cancelling the Kotlin flow)
+     * and immediately emits the terminal events with the partial text so any JS
+     * caller awaiting generate() resolves.
+     */
     override fun stopGeneration(promise: Promise) {
-        if (isGenerating.get()) {
-            shouldStop.set(true)
-            generationJob?.cancel()
-            isGenerating.set(false)
-            val partial = accumulatedResponse.toString()
-            sendEvent(EVENT_ON_GENERATION_STOPPED, Arguments.createMap().apply {
-                putString("reason", "cancelled")
-            })
-            // Emit a final completion carrying whatever text was produced so far.
-            // Without this, any JS caller awaiting generate()/generateWithVision()
-            // would hang forever after a stop (no complete/error ever arrives).
-            sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
-                putString("fullText", partial)
-                putBoolean("isFinished", true)
-            })
-            promise.resolve(true)
-        } else {
+        val session = currentSession
+        if (session == null || session.job?.isActive != true || session.stop.get()) {
             promise.resolve(false)
+            return
         }
+
+        session.stop.set(true)
+        try {
+            conversation?.let { if (it.isAlive) it.cancelProcess() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "cancelProcess failed: ${t.message}")
+        }
+
+        val partial = session.text.toString()
+        sendEvent(EVENT_ON_GENERATION_STOPPED, Arguments.createMap().apply {
+            putString("reason", "cancelled")
+        })
+        sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
+            putString("fullText", partial)
+            putBoolean("isFinished", true)
+        })
+        promise.resolve(true)
+    }
+
+    /**
+     * Whether a generation is currently running (and has not been asked to stop).
+     */
+    override fun isGenerating(promise: Promise) {
+        promise.resolve(isGenerationBusy())
     }
 
     /**
      * Check whether model is currently loaded in memory
      */
     override fun isModelLoaded(promise: Promise) {
-        promise.resolve(isLoaded && engine != null)
+        promise.resolve(isLoaded && engine?.isInitialized() == true && conversation?.isAlive == true)
     }
 
     /**
-     * Unload model from memory
+     * KV-cache usage of the current conversation so JS can shrink the next prompt
+     * before the context window overflows.
+     */
+    override fun getContextUsage(promise: Promise) {
+        val conv = conversation
+        var tokenCount = 0
+        if (conv != null && conv.isAlive && !isGenerationActive()) {
+            try {
+                tokenCount = conv.getTokenCount()
+            } catch (t: Throwable) {
+                Log.w(TAG, "getTokenCount failed: ${t.message}")
+            }
+        }
+        promise.resolve(Arguments.createMap().apply {
+            putInt("tokenCount", tokenCount)
+            putInt("maxTokens", MAX_NUM_TOKENS)
+            putBoolean("isLoaded", isLoaded && conv != null)
+        })
+    }
+
+    /**
+     * Drops the current conversation (and its KV cache) and starts a fresh one on
+     * the same engine. Used when the context window is exhausted.
+     */
+    override fun resetConversation(promise: Promise) {
+        coroutineScope.launch {
+            try {
+                lifecycleMutex.withLock {
+                    val eng = engine
+                    if (eng == null || !eng.isInitialized() || !isLoaded) {
+                        promise.reject("ERR_NOT_LOADED", "No model is loaded.")
+                        return@withLock
+                    }
+                    stopGenerationAndAwait()
+                    closeConversationSafely()
+                    conversation = eng.createConversation()
+                    promise.resolve(true)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "resetConversation failed: ${e.message}", e)
+                promise.reject("ERR_RESET", e.message, e)
+            }
+        }
+    }
+
+    /**
+     * Unload model from memory. Idempotent — resolves true if nothing is loaded.
      */
     override fun unloadModel(promise: Promise) {
         coroutineScope.launch {
             try {
-                // Step 1: Signal generation to stop
-                shouldStop.set(true)
-
-                // Step 2: Cancel and wait for the generation job to finish
-                val job = generationJob
-                if (job != null && job.isActive) {
-                    job.cancel()
-                    try {
-                        withTimeout(3000L) {
-                            job.join()
-                        }
-                    } catch (e: TimeoutCancellationException) {
-                        Log.w(TAG, "Generation job did not finish within timeout, proceeding with unload")
+                lifecycleMutex.withLock {
+                    // Stop decoding first and wait for the native runtime to
+                    // actually finish — closing mid-inference is a native crash.
+                    val stopped = stopGenerationAndAwait()
+                    if (!stopped) {
+                        Log.w(TAG, "Proceeding with unload after generation stop timeout")
                     }
+                    releaseEngineResources()
+                    promise.resolve(true)
                 }
-                generationJob = null
-                isGenerating.set(false)
-
-                // Step 3: Now safe to close resources — generation is fully stopped
-                try {
-                    conversation?.close()
-                    engine?.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error closing engine: ${e.message}")
-                }
-                conversation = null
-                engine = null
-                isLoaded = false
-                currentModelPath = null
-                promise.resolve(true)
             } catch (e: Exception) {
                 promise.reject("ERR_UNLOAD", e.message, e)
             }

@@ -36,7 +36,7 @@ import {
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import useLLM from '../../hooks/useLLM';
-import LLMService from '../../services/llmService';
+import LLMService, { estimateTokens } from '../../services/llmService';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
@@ -259,6 +259,19 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         [dispatch]
     );
 
+    // New Chat: stop any in-flight answer, clear the transcript and give the
+    // model a fresh context window (drops the KV cache on the same engine).
+    const handleNewChat = useCallback(async () => {
+        if (isGenerating) {
+            await stopGeneration().catch(() => {});
+        }
+        setMessages([]);
+        setInputText('');
+        if (currentStatus === 'loaded') {
+            await LLMService.resetConversation();
+        }
+    }, [isGenerating, stopGeneration, currentStatus]);
+
     // Send Message / Generate Output
     const handleSend = useCallback(async () => {
         const query = inputText.trim();
@@ -277,6 +290,17 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         // has actually been downloaded. Otherwise guide the user to the picker
         // instead of trying (and failing) to initialize a missing file.
         if (currentStatus !== 'loaded') {
+            if (currentStatus === 'loading') {
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        id: assistantMsgId,
+                        role: 'assistant',
+                        text: `"${selectedModel.name}" is still loading. Please wait a moment and send your message again.`,
+                    },
+                ]);
+                return;
+            }
             if (currentStatus !== 'downloaded') {
                 setMessages((prev) => [
                     ...prev,
@@ -321,6 +345,21 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
 
         try {
+            // Keep the conversation inside the model's context window. When the
+            // accumulated history leaves no room for this message, the KV cache
+            // is reset and the user is told the model lost earlier context.
+            const wasReset = await LLMService.ensureContextBudget(estimateTokens(query));
+            if (wasReset) {
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        id: `${assistantMsgId}-ctx`,
+                        role: 'assistant',
+                        text: '_Context window was full — earlier messages are no longer visible to the model._',
+                    },
+                ]);
+            }
+
             const response = await generate(query);
             setMessages((prev) => [
                 ...prev,
@@ -641,6 +680,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 isVisible={isDrawerVisible}
                 onClose={() => setIsDrawerVisible(false)}
                 onOpenAgent={onOpenAgent}
+                onNewChat={handleNewChat}
             />
         </View>
     );

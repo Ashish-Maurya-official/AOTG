@@ -29,6 +29,7 @@ import {
     setDownloadError,
     syncModelStatus,
     startLoadingModel,
+    setModelLoadFailed,
     setLoadedModel,
     deleteModel,
     unloadModel,
@@ -47,11 +48,21 @@ interface ModelSelectorModalProps {
 }
 
 const BACKENDS: { key: BackendType; label: string; desc: string }[] = [
-    { key: 'AUTO', label: '⚡ Auto', desc: 'NPU → GPU → CPU' },
-    { key: 'NPU', label: '🧠 NPU', desc: 'Fastest / Low Power' },
+    { key: 'AUTO', label: '⚡ Auto', desc: 'GPU → CPU' },
+    { key: 'NPU', label: '🧠 NPU', desc: 'NPU → GPU → CPU' },
     { key: 'GPU', label: '🎮 GPU', desc: 'High Performance' },
     { key: 'CPU', label: '⚙️ CPU', desc: 'Universal Fallback' },
 ];
+
+/** Human-readable backend fallback chain — mirrors LLMModule.kt */
+const backendChainLabel = (backend: string): string => {
+    switch (backend) {
+        case 'NPU': return 'NPU → GPU → CPU';
+        case 'GPU': return 'GPU → CPU';
+        case 'CPU': return 'CPU';
+        default: return 'GPU → CPU'; // AUTO
+    }
+};
 
 // Checkmark Vector Icon
 const CheckIcon = ({ color }: { color: string }) => (
@@ -123,6 +134,7 @@ const ModelItem = memo(
         onDelete,
         onSelect,
         preferredBackend,
+        isUnloading,
         colors,
     }: {
         model: ModelInfo;
@@ -136,6 +148,7 @@ const ModelItem = memo(
         onDelete: () => void;
         onSelect: () => void;
         preferredBackend: string;
+        isUnloading: boolean;
         colors: any;
     }) => {
         const { status, progress, speedMBs, bytesDownloaded, totalBytes, error } =
@@ -343,33 +356,22 @@ const ModelItem = memo(
                     )}
 
                     {/* Status 4: Loading */}
-                    {isLoading && (() => {
-                        // Show the actual backend chain being tried
-                        const backendChain = (() => {
-                            switch (preferredBackend) {
-                                case 'NPU': return 'NPU → GPU → CPU';
-                                case 'GPU': return 'GPU → CPU';
-                                case 'CPU': return 'CPU';
-                                default: return 'NPU \u2192 GPU \u2192 CPU'; // AUTO
-                            }
-                        })();
-                        return (
-                            <View
+                    {isLoading && (
+                        <View
+                            style={[
+                                styles.loadingButton,
+                                { backgroundColor: colors.card },
+                            ]}>
+                            <ActivityIndicator size="small" color="#10A37F" />
+                            <Text
                                 style={[
-                                    styles.loadingButton,
-                                    { backgroundColor: colors.card },
+                                    styles.buttonText,
+                                    { color: '#10A37F' },
                                 ]}>
-                                <ActivityIndicator size="small" color="#10A37F" />
-                                <Text
-                                    style={[
-                                        styles.buttonText,
-                                        { color: '#10A37F' },
-                                    ]}>
-                                    Trying {backendChain}...
-                                </Text>
-                            </View>
-                        );
-                    })()}
+                                Trying {backendChainLabel(preferredBackend)}...
+                            </Text>
+                        </View>
+                    )}
 
                     {/* Status 5: Loaded (Active) */}
                     {isLoaded && (() => {
@@ -382,21 +384,32 @@ const ModelItem = memo(
                                 <View style={styles.buttonGroup}>
                                     <Pressable
                                         onPress={onDelete}
+                                        disabled={isUnloading}
                                         hitSlop={8}
-                                        style={styles.deleteIconButton}>
+                                        style={[styles.deleteIconButton, isUnloading && styles.disabledButton]}>
                                         <TrashIcon color="#FF453A" />
                                     </Pressable>
                                     <Pressable
                                         onPress={onUnload}
+                                        disabled={isUnloading}
                                         style={[
                                             styles.unloadButton,
                                             { backgroundColor: colors.card, borderColor: colors.border },
                                         ]}>
-                                        <Text style={[styles.unloadButtonText, { color: colors.text }]}>
-                                            Unload
-                                        </Text>
+                                        {isUnloading ? (
+                                            <View style={styles.unloadingRow}>
+                                                <ActivityIndicator size="small" color={colors.text} />
+                                                <Text style={[styles.unloadButtonText, { color: colors.text }]}>
+                                                    Unloading…
+                                                </Text>
+                                            </View>
+                                        ) : (
+                                            <Text style={[styles.unloadButtonText, { color: colors.text }]}>
+                                                Unload
+                                            </Text>
+                                        )}
                                     </Pressable>
-                                    {needsReload && (
+                                    {needsReload && !isUnloading && (
                                         <Pressable
                                             onPress={onLoad}
                                             style={styles.loadButton}>
@@ -529,6 +542,53 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         });
     }, [visible, dispatch]);
 
+    // Re-entrancy guard shared by load / unload / delete so a double-tap (or a
+    // Load tapped while an Unload is still in flight) can never race the native
+    // engine lifecycle.
+    const lifecycleBusyRef = React.useRef(false);
+    const [unloadingModelId, setUnloadingModelId] = React.useState<string | null>(null);
+
+    const loadedModel = React.useMemo(
+        () => AVAILABLE_MODELS.find((m) => m.id === loadedModelId) || null,
+        [loadedModelId]
+    );
+
+    /**
+     * If the model is mid-generation, ask the user before interrupting it.
+     * Resolves true when it is OK to proceed (not generating, or user confirmed).
+     */
+    const confirmInterruptGeneration = useCallback(
+        async (actionLabel: string): Promise<boolean> => {
+            const generating = await LLMService.isGenerating();
+            if (!generating) return true;
+            return new Promise<boolean>((resolve) => {
+                Alert.alert(
+                    'Model is generating',
+                    `${loadedModel?.name || 'The model'} is still generating a response. ${actionLabel} will cancel the current generation. Are you sure?`,
+                    [
+                        { text: 'Keep generating', style: 'cancel', onPress: () => resolve(false) },
+                        { text: `Yes, ${actionLabel.toLowerCase()}`, style: 'destructive', onPress: () => resolve(true) },
+                    ],
+                    { cancelable: true, onDismiss: () => resolve(false) }
+                );
+            });
+        },
+        [loadedModel]
+    );
+
+    /**
+     * Gracefully stops generation (waits for the native runtime to wind down)
+     * and unloads the engine. Returns true on success.
+     */
+    const stopAndUnload = useCallback(async (): Promise<boolean> => {
+        await LLMService.stopGeneration().catch(() => {});
+        const ok = await LLMService.unloadModel();
+        if (ok) {
+            dispatch(unloadModel());
+        }
+        return ok;
+    }, [dispatch]);
+
     // Real Native Download Handler
     const handleDownload = useCallback(
         async (model: ModelInfo) => {
@@ -591,107 +651,132 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     // Delete Model Handler
     const handleDelete = useCallback(
         (model: ModelInfo) => {
+            if (lifecycleBusyRef.current) return;
+            const isLoadedModel = loadedModelId === model.id;
             Alert.alert(
                 'Delete Model File',
-                `Are you sure you want to delete ${model.name} (${model.size}) from device storage?`,
+                `Are you sure you want to delete ${model.name} (${model.size}) from device storage?${
+                    isLoadedModel ? ' It is currently loaded and will be unloaded first.' : ''
+                }`,
                 [
                     { text: 'Cancel', style: 'cancel' },
                     {
                         text: 'Delete',
                         style: 'destructive',
                         onPress: async () => {
+                            if (lifecycleBusyRef.current) return;
+                            lifecycleBusyRef.current = true;
                             try {
-                                await LLMService.deleteDownloadedModel(model.fileName);
-                                dispatch(deleteModel(model.id));
+                                if (isLoadedModel) {
+                                    const proceed = await confirmInterruptGeneration('Deleting');
+                                    if (!proceed) return;
+                                    await LLMService.stopGeneration().catch(() => {});
+                                }
+                                const deleted = await LLMService.deleteDownloadedModel(model.fileName);
+                                if (deleted) {
+                                    dispatch(deleteModel(model.id));
+                                } else {
+                                    Alert.alert('Delete Failed', 'The model file could not be removed.');
+                                }
                             } catch (err) {
                                 console.error('Failed to delete model:', err);
+                            } finally {
+                                lifecycleBusyRef.current = false;
                             }
                         },
                     },
                 ]
             );
         },
-        [dispatch]
+        [dispatch, loadedModelId, confirmInterruptGeneration]
     );
 
     // Real Model Loading Handler with Fallback Notification
     // Auto-unloads any previously loaded model before loading the new one
     const handleLoad = useCallback(
         async (model: ModelInfo) => {
-            // Unload any currently loaded model first
-            if (loadedModelId && loadedModelId !== model.id) {
-                try {
-                    // Stop any active generation before unloading
-                    await LLMService.stopGeneration().catch(() => {});
-                    await LLMService.unloadModel();
-                    dispatch(unloadModel());
-                } catch (err) {
-                    console.warn('[ModelSelector] Failed to unload previous model:', err);
-                }
-            } else if (loadedModelId === model.id) {
-                // Same model but reloading on different backend
-                try {
-                    // Stop any active generation before reloading
-                    await LLMService.stopGeneration().catch(() => {});
-                    await LLMService.unloadModel();
-                    dispatch(unloadModel());
-                } catch (err) {
-                    console.warn('[ModelSelector] Failed to unload model for reload:', err);
-                }
-            }
+            if (lifecycleBusyRef.current) return;
+            const currentStatus = modelStatuses[model.id]?.status;
+            if (currentStatus === 'loading') return;
 
-            dispatch(startLoadingModel(model.id));
+            lifecycleBusyRef.current = true;
             try {
-                const result = await LLMService.initialize(
-                    model.fileName,
-                    preferredBackend
-                );
-                dispatch(
-                    setLoadedModel({
-                        modelId: model.id,
-                        backend: result.actualBackend,
-                    })
-                );
-                onSelectModel(model.id);
-
-                if (result.wasFallback) {
-                    Alert.alert(
-                        'Backend Fallback Applied',
-                        `Requested backend (${result.requestedBackend}) is not available on this device chipset. Successfully loaded on ${result.actualBackend}!`
-                    );
+                if (loadedModelId) {
+                    const proceed = await confirmInterruptGeneration('Loading');
+                    if (!proceed) return;
+                    const unloaded = await stopAndUnload();
+                    if (!unloaded) {
+                        Alert.alert('Load Failed', 'Could not unload the current model. Please try again.');
+                        return;
+                    }
                 }
-            } catch (err: any) {
-                console.error('[ModelSelector] Native initialization error:', err);
-                Alert.alert(
-                    'Load Failed',
-                    err?.message ||
-                    'Could not initialize LiteRT-LM model. Please ensure the model file is completely downloaded.'
-                );
-                dispatch(
-                    syncModelStatus({
-                        modelId: model.id,
-                        isDownloaded: true,
-                    })
-                );
+
+                dispatch(startLoadingModel(model.id));
+                try {
+                    const result = await LLMService.initialize(
+                        model.fileName,
+                        preferredBackend
+                    );
+                    dispatch(
+                        setLoadedModel({
+                            modelId: model.id,
+                            backend: result.actualBackend,
+                        })
+                    );
+                    onSelectModel(model.id);
+
+                    if (result.wasFallback) {
+                        Alert.alert(
+                            'Backend Fallback Applied',
+                            `Requested backend (${result.requestedBackend}) is not available on this device chipset. Successfully loaded on ${result.actualBackend}!`
+                        );
+                    }
+                } catch (err: any) {
+                    console.error('[ModelSelector] Native initialization error:', err);
+                    const message =
+                        err?.message ||
+                        'Could not initialize LiteRT-LM model. Please ensure the model file is completely downloaded.';
+                    Alert.alert('Load Failed', message);
+                    dispatch(setModelLoadFailed({ modelId: model.id, error: message }));
+                }
+            } finally {
+                lifecycleBusyRef.current = false;
             }
         },
-        [dispatch, onSelectModel, preferredBackend, loadedModelId]
+        [dispatch, onSelectModel, preferredBackend, loadedModelId, modelStatuses, confirmInterruptGeneration, stopAndUnload]
     );
 
     // Unload Model Handler
     const handleUnload = useCallback(
         async () => {
+            if (lifecycleBusyRef.current || !loadedModelId) return;
+            const modelName = loadedModel?.name || 'Model';
+            const backend = activeBackend || 'unknown backend';
+
+            lifecycleBusyRef.current = true;
             try {
-                // Stop any active generation before unloading
-                await LLMService.stopGeneration().catch(() => {});
-                await LLMService.unloadModel();
-                dispatch(unloadModel());
+                const proceed = await confirmInterruptGeneration('Unloading');
+                if (!proceed) return;
+
+                setUnloadingModelId(loadedModelId);
+                const ok = await stopAndUnload();
+                if (ok) {
+                    Alert.alert(
+                        'Model Unloaded',
+                        `${modelName} was unloaded from ${backend} and its memory has been freed.`
+                    );
+                } else {
+                    Alert.alert('Unload Failed', 'Could not unload the model from memory.');
+                }
             } catch (err) {
                 console.error('[ModelSelector] Unload error:', err);
                 Alert.alert('Unload Failed', 'Could not unload the model from memory.');
+            } finally {
+                setUnloadingModelId(null);
+                lifecycleBusyRef.current = false;
             }
         },
-        [dispatch]
+        [loadedModelId, loadedModel, activeBackend, confirmInterruptGeneration, stopAndUnload]
     );
 
     return (
@@ -836,6 +921,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                         closeModal();
                                     }}
                                     preferredBackend={preferredBackend}
+                                    isUnloading={unloadingModelId === model.id}
                                     colors={colors}
                                 />
                             );
@@ -1144,6 +1230,14 @@ const styles = StyleSheet.create({
     unloadButtonText: {
         fontSize: 13,
         fontWeight: '600',
+    },
+    unloadingRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    disabledButton: {
+        opacity: 0.4,
     },
     loadedRow: {
         flexDirection: 'row',
