@@ -65,6 +65,22 @@ recognition, model loading, error handling, and edge-case handling."
 - Native LiteRT modules require a real Android build; validate on device after
   building via the normal build flow.
 
+## Deployment fix (production build blocker)
+Root cause: the repo had no `backend/` dir, but the Emergent full-stack pipeline
+(and the sandbox supervisor) expect `uvicorn server:app` in `/app/backend` and
+read `backend/.env` as the first build-context step — so BUILD failed with
+"read env file backend/.env: no such file or directory" and the supervisor
+`backend` service was FATAL ("couldn't chdir to /app/backend").
+Fix (code-level only, no Docker changes):
+- `backend/.env` (MONGO_URL, DB_NAME, CORS_ORIGINS — no hardcoded values).
+- `backend/requirements.txt` (matches the installed venv).
+- `backend/server.py` — FastAPI companion service, all routes under `/api`,
+  CORS, MongoDB via motor from env, lifespan-managed client; endpoints
+  `/api/`, `/api/health` (deep DB ping for HEALTH_CHECK), `/api/status` CRUD.
+The mobile app remains fully on-device; this backend only satisfies the deploy
+contract (build env read, service boot, HEALTH_CHECK, MONGODB_MIGRATE).
+Verified by testing_agent: 9/9 passed, service RUNNING on 0.0.0.0:8001.
+
 ## Backlog / next
 - P1: Mark a genuinely vision-capable model with `supportsVision: true` if/when
   one is added, to re-enable screenshot-based agent reasoning.
