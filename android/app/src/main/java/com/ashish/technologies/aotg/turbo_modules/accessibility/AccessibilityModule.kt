@@ -1,11 +1,11 @@
-package com.aotg.turbo_modules.accessibility
+package com.ashish.technologies.aotg.turbo_modules.accessibility
 
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.util.Log
-import com.aotg.NativeAccessibilitySpec
-import com.aotg.services.AOTGAccessibilityService
+import com.ashish.technologies.aotg.NativeAccessibilitySpec
+import com.ashish.technologies.aotg.services.AOTGAccessibilityService
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -326,8 +326,8 @@ class AccessibilityModule(
         val simpleName = AOTGAccessibilityService::class.java.name
 
         // Formats Android may use:
-        // "com.aotg/com.aotg.services.AOTGAccessibilityService"
-        // "com.aotg/.services.AOTGAccessibilityService"
+        // "com.ashish.technologies.aotg/com.ashish.technologies.aotg.services.AOTGAccessibilityService"
+        // "com.ashish.technologies.aotg/.services.AOTGAccessibilityService"
         val fullFormat = "$packageName/$canonicalName"
         val shortFormat = "$packageName/.${canonicalName.removePrefix("$packageName.")}"
         val nameFormat = "$packageName/$simpleName"

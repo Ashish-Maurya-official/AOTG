@@ -1,10 +1,10 @@
-package com.aotg.turbo_modules.llm
+package com.ashish.technologies.aotg.turbo_modules.llm
 
 import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.aotg.NativeLLMSpec
+import com.ashish.technologies.aotg.NativeLLMSpec
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext

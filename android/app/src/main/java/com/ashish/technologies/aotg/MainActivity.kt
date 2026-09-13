@@ -1,4 +1,4 @@
-package com.aotg
+package com.ashish.technologies.aotg
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate

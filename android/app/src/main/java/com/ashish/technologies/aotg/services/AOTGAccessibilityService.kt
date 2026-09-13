@@ -1,4 +1,4 @@
-package com.aotg.services
+package com.ashish.technologies.aotg.services
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -87,7 +87,7 @@ class AOTGAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 val packageName = event.packageName?.toString() ?: return
                 // Avoid spamming events for our own app
-                if (packageName == "com.aotg") return
+                if (packageName == "com.ashish.technologies.aotg") return
 
                 // Window-state changes are meaningful and rare — always emit.
                 // Content changes are extremely frequent, so throttle them.

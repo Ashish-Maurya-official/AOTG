@@ -7,5 +7,5 @@
     android:canPerformGestures="true"
     android:canTakeScreenshot="true"
     android:notificationTimeout="100"
-    android:settingsActivity="com.aotg.MainActivity"
+    android:settingsActivity="com.ashish.technologies.aotg.MainActivity"
     android:accessibilityFlags="flagReportViewIds|flagRequestEnhancedWebAccessibility|flagIncludeNotImportantViews" />
