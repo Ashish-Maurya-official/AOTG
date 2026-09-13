@@ -18,6 +18,8 @@ export interface ModelInfo {
   url: string;
   fileName: string;
   badge?: string;
+  /** Whether this model can accept image input (multimodal). Text-only models must NOT be sent screenshots. */
+  supportsVision: boolean;
 }
 
 export interface ModelState {
@@ -39,6 +41,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: 'The absolute latest generation (April 2026). Optimized for LiteRT-LM with top reasoning.',
     url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true',
     fileName: 'gemma-4-e2b.litertlm',
+    supportsVision: false,
     badge: 'Latest 2026',
   },
   {
@@ -49,6 +52,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: "Edge-optimized distillation of DeepSeek's reasoning model, packaged specifically for the LiteRT-LM runtime.",
     url: 'https://huggingface.co/litert-community/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'deepseek-r1-distill-qwen-1.5b.litertlm',
+    supportsVision: false,
     badge: 'Reasoning',
   },
   {
@@ -59,6 +63,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: 'Excellent balance of speed and capability. Features 8-bit quantization and multi-prefill sequence packaging.',
     url: 'https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'qwen-2.5-1.5b-instruct.litertlm',
+    supportsVision: false,
     badge: 'Fast',
   },
   {
@@ -69,6 +74,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: 'Larger, highly capable sibling to E2B. Stronger reasoning capabilities at the cost of higher RAM footprint.',
     url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm?download=true',
     fileName: 'gemma-4-e4b.litertlm',
+    supportsVision: false,
   },
   {
     id: 'phi-4-mini-instruct',
@@ -78,6 +84,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: "Microsoft's highly optimized SLM for mobile. 8-bit quantized configuration with a 4096 context window.",
     url: 'https://huggingface.co/litert-community/Phi-4-mini-instruct/resolve/main/Phi-4-mini-instruct_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'phi-4-mini-instruct.litertlm',
+    supportsVision: false,
   },
 ];
 
@@ -206,6 +213,23 @@ const llmSlice = createSlice({
       const modelId = action.payload;
       if (state.modelStatuses[modelId]) {
         state.modelStatuses[modelId].status = 'loading';
+        state.modelStatuses[modelId].error = null;
+      }
+    },
+    setModelLoadFailed: (
+      state,
+      action: PayloadAction<{ modelId: string; error: string }>
+    ) => {
+      // A load attempt only starts once a model is downloaded, so on failure
+      // we revert its status back to 'downloaded' (never stuck on 'loading').
+      const { modelId, error } = action.payload;
+      if (state.modelStatuses[modelId]) {
+        state.modelStatuses[modelId].status = 'downloaded';
+        state.modelStatuses[modelId].error = error;
+      }
+      if (state.loadedModelId === modelId) {
+        state.loadedModelId = null;
+        state.activeBackend = null;
       }
     },
     setLoadedModel: (
@@ -263,6 +287,7 @@ export const {
   setDownloadError,
   syncModelStatus,
   startLoadingModel,
+  setModelLoadFailed,
   setLoadedModel,
   deleteModel,
   unloadModel,

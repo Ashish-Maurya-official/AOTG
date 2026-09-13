@@ -56,6 +56,11 @@ class AOTGAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Throttle noisy TYPE_WINDOW_CONTENT_CHANGED events so they don't flood the
+    // React Native bridge (they can fire dozens of times per second).
+    @Volatile
+    private var lastEventEmitTime = 0L
+
     // ─────────────────────────────────────────────────────────────
     // Lifecycle
     // ─────────────────────────────────────────────────────────────
@@ -83,6 +88,16 @@ class AOTGAccessibilityService : AccessibilityService() {
                 val packageName = event.packageName?.toString() ?: return
                 // Avoid spamming events for our own app
                 if (packageName == "com.aotg") return
+
+                // Window-state changes are meaningful and rare — always emit.
+                // Content changes are extremely frequent, so throttle them.
+                val now = System.currentTimeMillis()
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+                    now - lastEventEmitTime < 500
+                ) {
+                    return
+                }
+                lastEventEmitTime = now
 
                 val params = Arguments.createMap().apply {
                     putString("packageName", packageName)
@@ -362,7 +377,17 @@ class AOTGAccessibilityService : AccessibilityService() {
      */
     private fun executeAction(node: AccessibilityNodeInfo, action: String, value: String): Boolean {
         return when (action.lowercase()) {
-            "click" -> node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            "click" -> {
+                // Prefer the semantic node action; if it fails (common for
+                // custom/RN/WebView views), fall back to a tap at the node's
+                // on-screen center so the click still lands.
+                if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    true
+                } else {
+                    Log.w(TAG, "click: ACTION_CLICK failed, falling back to coordinate tap")
+                    tapNodeCenter(node)
+                }
+            }
             "long_click" -> node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
             "set_text" -> {
                 // Strategy 1: Native ACTION_SET_TEXT (works for native Android views)
@@ -408,6 +433,22 @@ class AOTGAccessibilityService : AccessibilityService() {
                 false
             }
         }
+    }
+
+    /**
+     * Taps the center of a node's on-screen bounds. Used as a fallback when a
+     * node's semantic ACTION_CLICK is rejected but the element is still visible.
+     */
+    private fun tapNodeCenter(node: AccessibilityNodeInfo): Boolean {
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.width() <= 0 || rect.height() <= 0) {
+            Log.w(TAG, "tapNodeCenter: node has no visible bounds")
+            return false
+        }
+        val cx = rect.exactCenterX()
+        val cy = rect.exactCenterY()
+        return tapAtCoordinates(cx, cy)
     }
 
     // ─────────────────────────────────────────────────────────────

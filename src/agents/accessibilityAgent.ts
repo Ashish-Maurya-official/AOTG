@@ -37,6 +37,9 @@ class AccessibilityAgentImpl implements Agent {
 
   cancel(): void {
     this.shouldStop = true;
+    // Also interrupt any in-flight LLM inference so a cancel pressed during the
+    // "thinking" phase is responsive, instead of waiting for the full response.
+    LLMService.stopGeneration().catch(() => {});
   }
 
   async execute(
@@ -59,6 +62,9 @@ class AccessibilityAgentImpl implements Agent {
     this.shouldStop = false;
     const startTime = Date.now();
     const steps: AgentStep[] = [];
+    let consecutiveObserveFailures = 0;
+    let lastActionSignature: string | null = null;
+    let repeatedActionCount = 0;
 
     try {
       // Verify service is enabled
@@ -114,49 +120,92 @@ class AccessibilityAgentImpl implements Agent {
 
         // ── OBSERVE ──
         try {
-          const observation = await AccessibilityService.observeScreen(
-            config.includeScreenshots,
-          );
+          // Tree only — the screenshot (when the model supports vision) is
+          // captured separately below to avoid grabbing the screen twice.
+          const observation = await AccessibilityService.observeScreen(false);
           step.observation = observation;
+
+          // A persistently empty/errored screen (e.g. no active window) should
+          // not spin forever — bail out after several consecutive failures.
+          if (observation.error && observation.elements.length === 0) {
+            consecutiveObserveFailures++;
+            if (consecutiveObserveFailures >= 3) {
+              step.status = 'failed';
+              step.error = observation.error;
+              steps.push(step);
+              onStep({...step});
+              return {
+                success: false,
+                steps,
+                summary: `Unable to read the screen: ${observation.error}`,
+                error: observation.error,
+                startTime,
+                endTime: Date.now(),
+              };
+            }
+          } else {
+            consecutiveObserveFailures = 0;
+          }
+
           step.status = 'thinking';
           onStep({...step});
         } catch (err) {
+          consecutiveObserveFailures++;
           step.status = 'failed';
           step.error =
             err instanceof Error ? err.message : 'Failed to observe screen';
           steps.push(step);
           onStep({...step});
+          if (consecutiveObserveFailures >= 3) {
+            return {
+              success: false,
+              steps,
+              summary: 'Agent failed to observe the screen repeatedly',
+              error: step.error,
+              startTime,
+              endTime: Date.now(),
+            };
+          }
+          await this.delay(500);
           continue; // Try next step
         }
 
         // ── THINK ──
         let action: AgentAction;
         try {
+          step.rawThinking = '';
+
+          // Only capture a screenshot when the loaded model actually supports
+          // vision. Sending an image to a text-only model throws on-device.
+          let screenshotPath: string | null = null;
+          if (config.useVision && config.includeScreenshots) {
+            screenshotPath = await AccessibilityService.takeScreenshotToFile();
+          }
+
+          const useVision = screenshotPath != null;
           const prompt = buildActionPrompt(
             instruction,
             step.observation!,
             steps,
             config,
+            useVision,
           );
 
-          step.rawThinking = '';
+          const onToken = (token: string) => {
+            step.rawThinking += token;
+            onStep({...step});
+          };
 
-          // Capture screenshot for vision inference (parallel with prompt build)
-          let screenshotPath: string | null = null;
-          if (config.includeScreenshots) {
-            screenshotPath = await AccessibilityService.takeScreenshotToFile();
-          }
+          // Vision inference when available, else text-only — with a hard
+          // timeout so a stalled model can never hang the whole loop.
+          const inference = useVision
+            ? LLMService.generateWithVision(prompt, screenshotPath!, onToken)
+            : LLMService.generate(prompt, onToken);
 
-          // Use vision inference if screenshot is available, else fall back to text-only
-          const llmResponse = screenshotPath
-            ? await LLMService.generateWithVision(prompt, screenshotPath, (token) => {
-                step.rawThinking += token;
-                onStep({...step});
-              })
-            : await LLMService.generate(prompt, (token) => {
-                step.rawThinking += token;
-                onStep({...step});
-              });
+          const llmResponse = await this.withTimeout(
+            inference,
+            config.inferenceTimeoutMs,
+          );
 
           action = parseActionResponse(llmResponse);
           step.action = action;
@@ -171,9 +220,30 @@ class AccessibilityAgentImpl implements Agent {
             err instanceof Error ? err.message : 'LLM inference failed';
           steps.push(step);
           onStep({...step});
+          if (this.shouldStop) {
+            return {
+              success: false,
+              steps,
+              summary: 'Agent was cancelled by user',
+              startTime,
+              endTime: Date.now(),
+            };
+          }
           continue;
         }
 
+
+        // If the user cancelled during inference, stop cleanly here rather
+        // than trying to act on a partial/aborted response.
+        if (this.shouldStop) {
+          return {
+            success: false,
+            steps,
+            summary: 'Agent was cancelled by user',
+            startTime,
+            endTime: Date.now(),
+          };
+        }
 
         // ── Check for terminal actions ──
         if (action.type === 'done') {
@@ -199,6 +269,33 @@ class AccessibilityAgentImpl implements Agent {
             steps,
             summary: `Agent reported error: ${action.message}`,
             error: action.message,
+            startTime,
+            endTime: Date.now(),
+          };
+        }
+
+        // ── Loop / stuck detection ──
+        // If the agent proposes the exact same interacting action several times
+        // in a row, it's almost certainly stuck (the screen isn't changing).
+        const signature = actionSignature(action);
+        if (signature && signature === lastActionSignature) {
+          repeatedActionCount++;
+        } else {
+          repeatedActionCount = 0;
+        }
+        lastActionSignature = signature;
+
+        if (signature && repeatedActionCount >= 3) {
+          step.status = 'failed';
+          step.error = 'Repeated the same action too many times without progress';
+          steps.push(step);
+          onStep({...step});
+          return {
+            success: false,
+            steps,
+            summary:
+              'Agent stopped: it kept repeating the same action without the screen changing.',
+            error: 'Agent appears stuck',
             startTime,
             endTime: Date.now(),
           };
@@ -246,7 +343,8 @@ class AccessibilityAgentImpl implements Agent {
 
   /**
    * Executes a single agent action via the AccessibilityService.
-   * Includes retry logic: if node-based click fails, falls back to coordinate tap.
+   * For clicks, the native service falls back to a coordinate tap at the
+   * node's center when the semantic ACTION_CLICK is rejected.
    */
   private async executeAction(action: AgentAction): Promise<boolean> {
     switch (action.type) {
@@ -300,8 +398,67 @@ class AccessibilityAgentImpl implements Agent {
     }
   }
 
+  /**
+   * Wraps a promise with a timeout. If it doesn't settle in time, the in-flight
+   * LLM generation is stopped and the returned promise rejects. This guarantees
+   * a single stalled inference can never hang the observe→think→act loop.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        LLMService.stopGeneration().catch(() => {});
+        reject(new Error(`LLM inference timed out after ${ms}ms`));
+      }, ms);
+
+      promise.then(
+        value => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        err => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+/**
+ * Builds a stable signature for an interacting action so repeated identical
+ * actions can be detected. Terminal / passive actions (done, error, wait)
+ * return null so they never trip the stuck detector.
+ */
+function actionSignature(action: AgentAction): string | null {
+  switch (action.type) {
+    case 'click':
+    case 'long_click':
+      return `${action.type}:${action.target}`;
+    case 'set_text':
+      return `set_text:${action.target}:${action.value}`;
+    case 'scroll':
+      return `scroll:${action.target}:${action.direction}`;
+    case 'tap_coordinates':
+      return `tap:${action.x},${action.y}`;
+    case 'swipe':
+      return `swipe:${action.startX},${action.startY},${action.endX},${action.endY}`;
+    case 'back':
+      return 'back';
+    case 'home':
+      return 'home';
+    default:
+      return null;
   }
 }
 

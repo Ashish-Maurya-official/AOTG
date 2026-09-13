@@ -1,6 +1,7 @@
 import React, {
     memo,
     useCallback,
+    useEffect,
     useMemo,
     useRef,
     useState,
@@ -30,9 +31,12 @@ import {
     setSelectedModel,
     startLoadingModel,
     setLoadedModel,
+    setModelLoadFailed,
+    syncModelStatus,
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import useLLM from '../../hooks/useLLM';
+import LLMService from '../../services/llmService';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
@@ -174,6 +178,32 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         [selectedModelId]
     );
 
+    // Sync on-disk model state on mount so already-downloaded models are
+    // recognized after an app restart (the status dot + auto-load depend on it).
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            for (const model of AVAILABLE_MODELS) {
+                try {
+                    const check = await LLMService.checkModelStatus(model.fileName);
+                    if (cancelled) return;
+                    dispatch(
+                        syncModelStatus({
+                            modelId: model.id,
+                            isDownloaded: check.isDownloaded,
+                            localPath: check.localPath,
+                        })
+                    );
+                } catch (_) {
+                    // Non-fatal — the model selector re-syncs when opened.
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
+
     // Preserved animation definition
     const widthAnim = useRef(new Animated.Value(COLLAPSED_WIDTH)).current;
 
@@ -243,10 +273,25 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             { id: userMsgId, role: 'user', text: query },
         ]);
 
-        try {
-            // Auto-load model if not loaded yet
-            if (currentStatus !== 'loaded') {
-                dispatch(startLoadingModel(selectedModel.id));
+        // If the selected model isn't loaded, load it first — but only when it
+        // has actually been downloaded. Otherwise guide the user to the picker
+        // instead of trying (and failing) to initialize a missing file.
+        if (currentStatus !== 'loaded') {
+            if (currentStatus !== 'downloaded') {
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        id: assistantMsgId,
+                        role: 'assistant',
+                        text: `"${selectedModel.name}" isn't downloaded yet. Open the model selector (top-right) to download and load it before chatting.`,
+                    },
+                ]);
+                setIsModelModalVisible(true);
+                return;
+            }
+
+            dispatch(startLoadingModel(selectedModel.id));
+            try {
                 const result = await loadModel(selectedModel.fileName, preferredBackend);
                 dispatch(
                     setLoadedModel({
@@ -254,10 +299,29 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         backend: result.actualBackend,
                     })
                 );
+            } catch (loadErr: any) {
+                console.error('[HomePage] Model load error:', loadErr);
+                // Revert the status so it doesn't get stuck on "loading" forever.
+                dispatch(
+                    setModelLoadFailed({
+                        modelId: selectedModel.id,
+                        error: loadErr?.message || 'Failed to load model',
+                    })
+                );
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        id: assistantMsgId,
+                        role: 'assistant',
+                        text: `Could not load ${selectedModel.name}: ${loadErr?.message || 'initialization failed'}. Try a different acceleration backend, or re-download the model from the selector.`,
+                    },
+                ]);
+                return;
             }
+        }
 
+        try {
             const response = await generate(query);
-
             setMessages((prev) => [
                 ...prev,
                 { id: assistantMsgId, role: 'assistant', text: response },
@@ -271,7 +335,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     role: 'assistant',
                     text:
                         streamedText ||
-                        'Error: Could not generate response on device. Please ensure the model is loaded.',
+                        'Error: Could not generate a response on device. Please try again.',
                 },
             ]);
         }
@@ -282,6 +346,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         loadModel,
         selectedModel.fileName,
         selectedModel.id,
+        selectedModel.name,
         generate,
         streamedText,
         dispatch,

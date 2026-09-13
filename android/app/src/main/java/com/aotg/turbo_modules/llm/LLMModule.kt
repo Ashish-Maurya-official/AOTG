@@ -569,8 +569,16 @@ class LLMModule(
             shouldStop.set(true)
             generationJob?.cancel()
             isGenerating.set(false)
+            val partial = accumulatedResponse.toString()
             sendEvent(EVENT_ON_GENERATION_STOPPED, Arguments.createMap().apply {
                 putString("reason", "cancelled")
+            })
+            // Emit a final completion carrying whatever text was produced so far.
+            // Without this, any JS caller awaiting generate()/generateWithVision()
+            // would hang forever after a stop (no complete/error ever arrives).
+            sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
+                putString("fullText", partial)
+                putBoolean("isFinished", true)
             })
             promise.resolve(true)
         } else {

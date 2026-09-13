@@ -100,12 +100,13 @@ export const useLLM = (): UseLLMReturn => {
 
   const stopGeneration = useCallback(async () => {
     const stopped = await LLMService.stopGeneration();
+    // NOTE: we intentionally do NOT remove the token/complete listeners here.
+    // The native side emits a final onGenerationComplete (with the partial
+    // text) when stopped, which resolves the pending generate() promise and
+    // runs its own cleanup. Removing listeners now would drop that event and
+    // leave the awaiting caller hanging forever.
     if (stopped) {
       setIsGenerating(false);
-      if (cleanupRef.current) {
-        cleanupRef.current();
-        cleanupRef.current = null;
-      }
     }
     return stopped;
   }, []);

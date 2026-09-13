@@ -20,7 +20,7 @@ import type {
 // System Prompt
 // ─────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an AI agent controlling an Android device to complete user tasks.
+const SYSTEM_PROMPT_VISION = `You are an AI agent controlling an Android device to complete user tasks.
 You receive BOTH a screenshot of the current screen AND a compact accessibility tree.
 
 ## How to use your inputs
@@ -32,6 +32,35 @@ You receive BOTH a screenshot of the current screen AND a compact accessibility 
 1. Respond with ONLY a valid JSON object — no markdown, no explanation.
 2. Analyze the screenshot AND the element list before deciding.
 3. If a target element is not visible, scroll to find it.
+4. After typing text, tap the search/submit button or press enter.
+5. Handle any dialog/popup before proceeding.
+6. If stuck (same screen after action), try an alternative approach.
+7. Use "done" when the task is complete, "error" if it cannot be completed.
+
+## Action Schema — respond with ONE of:
+{"type":"click","target":"<id>","reasoning":"<why>"}
+{"type":"long_click","target":"<id>","reasoning":"<why>"}
+{"type":"set_text","target":"<id>","value":"<text>","reasoning":"<why>"}
+{"type":"scroll","target":"<id>","direction":"forward|backward","reasoning":"<why>"}
+{"type":"tap_coordinates","x":<n>,"y":<n>,"reasoning":"<why>"}
+{"type":"swipe","startX":<n>,"startY":<n>,"endX":<n>,"endY":<n>,"reasoning":"<why>"}
+{"type":"back","reasoning":"<why>"}
+{"type":"home","reasoning":"<why>"}
+{"type":"wait","durationMs":<ms>,"reasoning":"<why>"}
+{"type":"done","result":"<summary>"}
+{"type":"error","message":"<why>"}`;
+
+const SYSTEM_PROMPT_TEXT = `You are an AI agent controlling an Android device to complete user tasks.
+You receive a compact accessibility tree describing the elements currently on screen. You do NOT have a screenshot — rely only on the element list.
+
+## How to use your inputs
+- Each element has a semantic "id", plus text/description/type and a center point "xy":[x,y].
+- Always prefer node actions using the element "id". Only use tap_coordinates when no suitable id exists (use the element's "xy" values).
+
+## Rules
+1. Respond with ONLY a valid JSON object — no markdown, no explanation.
+2. Analyze the element list carefully before deciding.
+3. If a target element is not in the list, scroll to reveal more elements.
 4. After typing text, tap the search/submit button or press enter.
 5. Handle any dialog/popup before proceeding.
 6. If stuck (same screen after action), try an alternative approach.
@@ -63,10 +92,11 @@ export function buildActionPrompt(
   observation: ScreenObservation,
   history: AgentStep[],
   config: AgentConfig,
+  useVision: boolean = true,
 ): string {
   const parts: string[] = [];
 
-  parts.push(SYSTEM_PROMPT);
+  parts.push(useVision ? SYSTEM_PROMPT_VISION : SYSTEM_PROMPT_TEXT);
   parts.push('');
 
   parts.push(`## Task`);
@@ -272,11 +302,86 @@ export function parseActionResponse(response: string): AgentAction {
       return {type: 'error', message: 'LLM response missing "type" field'};
     }
 
-    return parsed;
+    return validateAction(parsed);
   } catch (e) {
     return {
       type: 'error',
       message: `Failed to parse LLM action: ${e instanceof Error ? e.message : 'unknown error'}`,
     };
+  }
+}
+
+/**
+ * Validates that an action has all fields required for its type.
+ * Returns an {type:'error'} action with a helpful message when invalid, so the
+ * agent loop degrades gracefully instead of executing a malformed action
+ * (e.g. a click with no target, or coordinates that aren't numbers).
+ */
+function validateAction(action: AgentAction): AgentAction {
+  const isNum = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v);
+
+  switch (action.type) {
+    case 'click':
+    case 'long_click':
+      if (!action.target) {
+        return {type: 'error', message: `"${action.type}" action is missing a "target" element id`};
+      }
+      return action;
+
+    case 'set_text':
+      if (!action.target) {
+        return {type: 'error', message: '"set_text" action is missing a "target" element id'};
+      }
+      if (typeof action.value !== 'string') {
+        return {type: 'error', message: '"set_text" action is missing a string "value"'};
+      }
+      return action;
+
+    case 'scroll':
+      if (!action.target) {
+        return {type: 'error', message: '"scroll" action is missing a "target" element id'};
+      }
+      if (action.direction !== 'forward' && action.direction !== 'backward') {
+        return {...action, direction: 'forward'};
+      }
+      return action;
+
+    case 'tap_coordinates':
+      if (!isNum(action.x) || !isNum(action.y)) {
+        return {type: 'error', message: '"tap_coordinates" requires numeric "x" and "y"'};
+      }
+      return action;
+
+    case 'swipe':
+      if (!isNum(action.startX) || !isNum(action.startY) || !isNum(action.endX) || !isNum(action.endY)) {
+        return {type: 'error', message: '"swipe" requires numeric start/end coordinates'};
+      }
+      return action;
+
+    case 'wait':
+      if (!isNum(action.durationMs)) {
+        return {...action, durationMs: 500};
+      }
+      return action;
+
+    case 'done':
+      if (typeof action.result !== 'string') {
+        return {...action, result: 'Task completed'};
+      }
+      return action;
+
+    case 'error':
+      if (typeof action.message !== 'string' || !action.message) {
+        return {type: 'error', message: 'Agent reported an unspecified error'};
+      }
+      return action;
+
+    case 'back':
+    case 'home':
+      return action;
+
+    default:
+      return {type: 'error', message: `Unknown action type: "${(action as any).type}"`};
   }
 }

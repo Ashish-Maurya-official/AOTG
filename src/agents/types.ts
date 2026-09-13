@@ -114,6 +114,10 @@ export interface AgentConfig {
   stepDelayMs: number;
   /** Whether to include screenshots in observations */
   includeScreenshots: boolean;
+  /** Whether the loaded model can accept image input. When false, the agent runs text-only (accessibility tree only). */
+  useVision: boolean;
+  /** Max time to wait for a single LLM inference before treating the step as failed */
+  inferenceTimeoutMs: number;
   /** Max elements to include in the LLM prompt (for token efficiency) */
   maxElementsInPrompt: number;
 }
@@ -122,7 +126,9 @@ export interface AgentConfig {
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   maxSteps: 25,
   stepDelayMs: 800,
-  includeScreenshots: true,   // Vision model always takes screenshot
+  includeScreenshots: true,   // Vision model takes a screenshot when supported
+  useVision: false,           // Enabled only for vision-capable models (see AVAILABLE_MODELS.supportsVision)
+  inferenceTimeoutMs: 120000, // 2 min hard cap per step so a stalled model can't hang the loop
   maxElementsInPrompt: 20,    // Aggressive compression — vision handles the rest
 };
 

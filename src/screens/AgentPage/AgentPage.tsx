@@ -27,6 +27,8 @@ import {
 import AccessibilityService from '../../services/accessibilityService';
 import agentOrchestrator from '../../agents/agentOrchestrator';
 import type {AgentStep} from '../../agents/types';
+import {DEFAULT_AGENT_CONFIG} from '../../agents/types';
+import {AVAILABLE_MODELS} from '../../store/slices/llmSlice';
 
 const {width} = Dimensions.get('window');
 
@@ -376,9 +378,21 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
         }),
       );
 
-      const result = await agentOrchestrator.execute(cmd, (step: AgentStep) => {
-        dispatch(updateStep(step));
-      });
+      // Only enable vision (screenshots) when the loaded model can actually
+      // accept images — otherwise run text-only against the accessibility tree.
+      const loadedModel = AVAILABLE_MODELS.find(m => m.id === loadedModelId);
+      const config = {
+        ...DEFAULT_AGENT_CONFIG,
+        useVision: !!loadedModel?.supportsVision,
+      };
+
+      const result = await agentOrchestrator.execute(
+        cmd,
+        (step: AgentStep) => {
+          dispatch(updateStep(step));
+        },
+        config,
+      );
 
       dispatch(completeExecution(result));
     },
