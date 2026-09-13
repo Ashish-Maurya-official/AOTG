@@ -173,6 +173,26 @@ class LLMModule(
         Log.i(TAG, "Engine released. Native heap: ${before / 1048576} MB -> ${after / 1048576} MB")
     }
 
+    /**
+     * Recreates the conversation on the live engine without acquiring the
+     * lifecycle mutex. Safe to call from the generation coroutine (which is not
+     * inside the mutex) after a cancelProcess() left the conversation in a
+     * broken state.
+     *
+     * If the engine is gone (raced with an unload), this is a no-op.
+     */
+    private fun resetConversationInternal() {
+        val eng = engine
+        if (eng == null || !eng.isInitialized() || !isLoaded) return
+        try {
+            closeConversationSafely()
+            conversation = eng.createConversation()
+            Log.d(TAG, "Conversation reset after cancelled generation")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to reset conversation after cancel: ${t.message}")
+        }
+    }
+
     /** Called by React Native when the module/bridge is torn down (e.g. dev reload). */
     override fun invalidate() {
         try {
@@ -595,6 +615,13 @@ class LLMModule(
                     }
                 }
 
+                // After cancelProcess(), the LiteRT-LM conversation can get
+                // stuck — sendMessageAsync() hangs silently. Recreate the
+                // conversation so the next generation starts clean.
+                if (previous?.stop?.get() == true) {
+                    resetConversationInternal()
+                }
+
                 if (session.stop.get()) return@launch
 
                 val conv = conversation
@@ -639,6 +666,13 @@ class LLMModule(
                     sendEvent(EVENT_ON_GENERATION_ERROR, Arguments.createMap().apply {
                         putString("error", t.message ?: "Unknown LiteRT-LM generation error")
                     })
+                }
+            } finally {
+                // If this generation was cancelled, proactively reset the
+                // conversation so it is in a clean state for the next run
+                // (whether or not a new run is already waiting).
+                if (session.stop.get()) {
+                    resetConversationInternal()
                 }
             }
         }

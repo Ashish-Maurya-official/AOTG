@@ -162,6 +162,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         { id: string; role: 'user' | 'assistant'; text: string }[]
     >([]);
 
+    // Re-entrancy guard: prevents two rapid messages from both triggering
+    // auto-load concurrently (the native side rejects with ERR_BUSY but the
+    // user would see a confusing "load error" message without this).
+    const isAutoLoadingRef = useRef(false);
+
     // Native LLM Hook
     const {
         isGenerating,
@@ -290,7 +295,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         // has actually been downloaded. Otherwise guide the user to the picker
         // instead of trying (and failing) to initialize a missing file.
         if (currentStatus !== 'loaded') {
-            if (currentStatus === 'loading') {
+            if (currentStatus === 'loading' || isAutoLoadingRef.current) {
                 setMessages((prev) => [
                     ...prev,
                     {
@@ -314,6 +319,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 return;
             }
 
+            isAutoLoadingRef.current = true;
             dispatch(startLoadingModel(selectedModel.id));
             try {
                 const result = await loadModel(selectedModel.fileName, preferredBackend);
@@ -341,6 +347,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     },
                 ]);
                 return;
+            } finally {
+                isAutoLoadingRef.current = false;
             }
         }
 

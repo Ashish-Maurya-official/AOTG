@@ -186,6 +186,8 @@ class LLMServiceImpl {
     onError?: (event: GenerationErrorEvent) => void
   ): Promise<() => void> {
     const subscriptions: { remove: () => void }[] = [];
+    // Guard against double-firing if an event arrives twice in edge cases.
+    let settled = false;
 
     if (this.eventEmitter) {
       if (onToken) {
@@ -201,6 +203,8 @@ class LLMServiceImpl {
           this.eventEmitter.addListener(
             'onGenerationComplete',
             (data: any) => {
+              if (settled) return;
+              settled = true;
               onComplete(data as GenerationCompleteEvent);
             }
           )
@@ -212,6 +216,8 @@ class LLMServiceImpl {
           this.eventEmitter.addListener(
             'onGenerationError',
             (data: any) => {
+              if (settled) return;
+              settled = true;
               onError(data as GenerationErrorEvent);
             }
           )

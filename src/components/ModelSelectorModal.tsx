@@ -670,7 +670,12 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                 if (isLoadedModel) {
                                     const proceed = await confirmInterruptGeneration('Deleting');
                                     if (!proceed) return;
-                                    await LLMService.stopGeneration().catch(() => {});
+                                    // Properly unload via JS layer so hook + Redux state stay in sync.
+                                    const unloaded = await stopAndUnload();
+                                    if (!unloaded) {
+                                        Alert.alert('Delete Failed', 'Could not unload the model before deleting. Please try again.');
+                                        return;
+                                    }
                                 }
                                 const deleted = await LLMService.deleteDownloadedModel(model.fileName);
                                 if (deleted) {
@@ -688,7 +693,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 ]
             );
         },
-        [dispatch, loadedModelId, confirmInterruptGeneration]
+        [dispatch, loadedModelId, confirmInterruptGeneration, stopAndUnload]
     );
 
     // Real Model Loading Handler with Fallback Notification
