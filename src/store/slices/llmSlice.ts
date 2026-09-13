@@ -41,7 +41,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: 'The absolute latest generation (April 2026). Optimized for LiteRT-LM with top reasoning.',
     url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true',
     fileName: 'gemma-4-e2b.litertlm',
-    supportsVision: false,
+    supportsVision: true,
     badge: 'Latest 2026',
   },
   {
@@ -74,7 +74,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     description: 'Larger, highly capable sibling to E2B. Stronger reasoning capabilities at the cost of higher RAM footprint.',
     url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm?download=true',
     fileName: 'gemma-4-e4b.litertlm',
-    supportsVision: false,
+    supportsVision: true,
   },
   {
     id: 'phi-4-mini-instruct',

@@ -10,6 +10,7 @@ export interface UseLLMReturn {
   error: string | null;
   loadModel: (modelPath: string, backend?: BackendType) => Promise<InitializeResult>;
   generate: (prompt: string, onToken?: (token: string) => void) => Promise<string>;
+  generateWithVision: (prompt: string, imagePath: string, onToken?: (token: string) => void) => Promise<string>;
   stopGeneration: () => Promise<boolean>;
   unloadModel: () => Promise<boolean>;
 }
@@ -98,6 +99,39 @@ export const useLLM = (): UseLLMReturn => {
     []
   );
 
+  const generateWithVision = useCallback(
+    async (
+      prompt: string,
+      imagePath: string,
+      onToken?: (token: string) => void
+    ): Promise<string> => {
+      setError(null);
+      setIsGenerating(true);
+      setStreamedText('');
+
+      try {
+        const result = await LLMService.generateWithVision(
+          prompt,
+          imagePath,
+          (chunk: string) => {
+            setStreamedText((prev) => prev + chunk);
+            if (onToken) {
+              onToken(chunk);
+            }
+          }
+        );
+        setIsGenerating(false);
+        setStreamedText(result);
+        return result;
+      } catch (err: any) {
+        setIsGenerating(false);
+        setError(err?.message || 'Failed to generate with vision');
+        throw err;
+      }
+    },
+    []
+  );
+
   const stopGeneration = useCallback(async () => {
     const stopped = await LLMService.stopGeneration();
     // NOTE: we intentionally do NOT remove the token/complete listeners here.
@@ -144,6 +178,7 @@ export const useLLM = (): UseLLMReturn => {
     error,
     loadModel,
     generate,
+    generateWithVision,
     stopGeneration,
     unloadModel,
   };

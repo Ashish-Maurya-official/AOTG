@@ -8,10 +8,13 @@ import React, {
 } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     Animated,
     Dimensions,
+    Image,
     Keyboard,
     KeyboardAvoidingView,
+    Modal,
     Platform,
     Pressable,
     ScrollView,
@@ -40,6 +43,8 @@ import LLMService, { estimateTokens } from '../../services/llmService';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
+import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
+import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 
 const { width } = Dimensions.get('window');
 
@@ -47,6 +52,26 @@ const { width } = Dimensions.get('window');
 const EXPANDED_WIDTH = width * 0.85;
 const COLLAPSED_WIDTH = width * 0.75;
 const ANIMATION_DURATION = 500;
+
+// --- Attachment Types & Constants ---
+const INPUT_HEIGHT_NORMAL = 40.5;
+const INPUT_HEIGHT_WITH_PREVIEW = 130;
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+const SUPPORTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
+
+interface Attachment {
+    uri: string;
+    name: string;
+    type: string;
+    size?: number;
+}
+
+interface ChatMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    text: string;
+    attachment?: Attachment;
+}
 
 const HIT_SLOP_8 = { top: 8, bottom: 8, left: 8, right: 8 };
 const HIT_SLOP_10 = { top: 10, bottom: 10, left: 10, right: 10 };
@@ -136,6 +161,31 @@ const HeadphoneIcon = memo(({ color }: { color: string }) => (
     </View>
 ));
 
+const UploadIcon = memo(({ color }: { color: string }) => (
+    <View style={styles.uploadIconContainer}>
+        {/* Arrow up */}
+        <View style={[styles.uploadArrowStem, { backgroundColor: color }]} />
+        <View style={[styles.uploadArrowLeft, { backgroundColor: color }]} />
+        <View style={[styles.uploadArrowRight, { backgroundColor: color }]} />
+        {/* Tray */}
+        <View style={[styles.uploadTray, { borderColor: color }]} />
+    </View>
+));
+
+const CloseIcon = memo(({ color, size = 16 }: { color: string; size?: number }) => (
+    <View style={[styles.closeIconContainer, { width: size, height: size }]}>
+        <View style={[styles.closeLine1, { backgroundColor: color, width: size * 0.7 }]} />
+        <View style={[styles.closeLine2, { backgroundColor: color, width: size * 0.7 }]} />
+    </View>
+));
+
+const FileIcon = memo(({ color }: { color: string }) => (
+    <View style={styles.fileIconContainer}>
+        <View style={[styles.fileBody, { borderColor: color }]} />
+        <View style={[styles.fileFold, { borderColor: color, backgroundColor: color + '20' }]} />
+    </View>
+));
+
 const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const theme = useTheme();
     const { colors } = theme;
@@ -158,9 +208,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [isModelModalVisible, setIsModelModalVisible] = useState(false);
     const [isDrawerVisible, setIsDrawerVisible] = useState(false);
     const [inputText, setInputText] = useState('');
-    const [messages, setMessages] = useState<
-        { id: string; role: 'user' | 'assistant'; text: string }[]
-    >([]);
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
+    const [isPlusMenuVisible, setIsPlusMenuVisible] = useState(false);
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
@@ -172,6 +222,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         isGenerating,
         streamedText,
         generate,
+        generateWithVision,
         stopGeneration,
         loadModel,
     } = useLLM();
@@ -211,6 +262,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     // Preserved animation definition
     const widthAnim = useRef(new Animated.Value(COLLAPSED_WIDTH)).current;
+    const inputHeightAnim = useRef(new Animated.Value(INPUT_HEIGHT_NORMAL)).current;
 
     const scrollViewRef = useRef<ScrollView>(null);
     const isAutoScrollEnabled = useRef(true);
@@ -272,24 +324,147 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
         setMessages([]);
         setInputText('');
+        setPendingAttachment(null);
+        inputHeightAnim.setValue(INPUT_HEIGHT_NORMAL);
         if (currentStatus === 'loaded') {
             await LLMService.resetConversation();
         }
-    }, [isGenerating, stopGeneration, currentStatus]);
+    }, [isGenerating, stopGeneration, currentStatus, inputHeightAnim]);
+
+    // --- Attachment Handlers ---
+    const animateInputHeight = useCallback((toValue: number) => {
+        Animated.timing(inputHeightAnim, {
+            toValue,
+            duration: 250,
+            useNativeDriver: false,
+        }).start();
+    }, [inputHeightAnim]);
+
+    const handleOpenPlusMenu = useCallback(() => {
+        ReactNativeHapticFeedback.trigger('impactLight', {
+            enableVibrateFallback: true,
+            ignoreAndroidSystemSettings: false,
+        });
+        setIsPlusMenuVisible(true);
+    }, []);
+
+    const handleClosePlusMenu = useCallback(() => {
+        setIsPlusMenuVisible(false);
+    }, []);
+
+    const handlePickFile = useCallback(async () => {
+        setIsPlusMenuVisible(false);
+        try {
+            const result = await pick({
+                mode: 'import',
+                type: [
+                    DocumentPickerTypes.images,
+                ],
+            });
+
+            const file = result[0];
+            if (!file) return;
+
+            const fileType = file.type || '';
+            const fileSize = file.size || 0;
+
+            // Validate file type
+            if (!SUPPORTED_IMAGE_TYPES.includes(fileType.toLowerCase())) {
+                Alert.alert(
+                    'Unsupported File',
+                    `"${file.name}" is not a supported image type. Supported: JPEG, PNG, WebP, GIF.`,
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
+            // Validate file size
+            if (fileSize > MAX_FILE_SIZE_BYTES) {
+                Alert.alert(
+                    'File Too Large',
+                    `"${file.name}" is ${(fileSize / (1024 * 1024)).toFixed(1)} MB. Maximum allowed is 10 MB.`,
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
+            // Cache a local copy of the file for native modules
+            let fileUri = file.uri;
+            try {
+                const copyResult = await keepLocalCopy({
+                    files: [{ uri: file.uri, fileName: file.name || 'file' }],
+                    destination: 'cachesDirectory',
+                });
+                if (copyResult[0].status === 'success') {
+                    fileUri = copyResult[0].localUri;
+                }
+            } catch (copyErr) {
+                console.warn('[HomePage] Failed to create local copy:', copyErr);
+            }
+
+            setPendingAttachment({
+                uri: fileUri,
+                name: file.name || 'file',
+                type: fileType,
+                size: fileSize,
+            });
+            animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
+        } catch (err: any) {
+            if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
+                // User cancelled — no state change
+                return;
+            }
+            console.error('[HomePage] File pick error:', err);
+            Alert.alert('Error', 'Could not pick file. Please try again.', [{ text: 'OK' }]);
+        }
+    }, [animateInputHeight]);
+
+    const handleRemoveAttachment = useCallback(() => {
+        setPendingAttachment(null);
+        animateInputHeight(INPUT_HEIGHT_NORMAL);
+    }, [animateInputHeight]);
 
     // Send Message / Generate Output
     const handleSend = useCallback(async () => {
         const query = inputText.trim();
-        if (!query || isGenerating) return;
+        const attachment = pendingAttachment;
 
+        // Need at least text or an attachment
+        if ((!query && !attachment) || isGenerating) return;
+
+        // Clear input state immediately
         setInputText('');
+        setPendingAttachment(null);
+        animateInputHeight(INPUT_HEIGHT_NORMAL);
+
         const userMsgId = Date.now().toString();
         const assistantMsgId = (Date.now() + 1).toString();
 
-        setMessages((prev) => [
-            ...prev,
-            { id: userMsgId, role: 'user', text: query },
-        ]);
+        // Build the single combined user message
+        const userMessage: ChatMessage = {
+            id: userMsgId,
+            role: 'user',
+            text: query,
+            attachment: attachment || undefined,
+        };
+
+        setMessages((prev) => [...prev, userMessage]);
+
+        // Check if attachment is an image and model supports vision
+        const isImageAttachment = attachment && SUPPORTED_IMAGE_TYPES.includes(attachment.type.toLowerCase());
+        const modelSupportsVision = !!selectedModel.supportsVision;
+
+        if (isImageAttachment && !modelSupportsVision) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" doesn't support image input. Please select a vision-capable model to process images, or send a text-only message.`,
+                },
+            ]);
+            return;
+        }
 
         // If the selected model isn't loaded, load it first — but only when it
         // has actually been downloaded. Otherwise guide the user to the picker
@@ -331,7 +506,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 );
             } catch (loadErr: any) {
                 console.error('[HomePage] Model load error:', loadErr);
-                // Revert the status so it doesn't get stuck on "loading" forever.
                 dispatch(
                     setModelLoadFailed({
                         modelId: selectedModel.id,
@@ -353,10 +527,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
 
         try {
-            // Keep the conversation inside the model's context window. When the
-            // accumulated history leaves no room for this message, the KV cache
-            // is reset and the user is told the model lost earlier context.
-            const wasReset = await LLMService.ensureContextBudget(estimateTokens(query));
+            // Keep the conversation inside the model's context window.
+            const promptText = query || (attachment ? `[Image: ${attachment.name}]` : '');
+            const wasReset = await LLMService.ensureContextBudget(estimateTokens(promptText));
             if (wasReset) {
                 setMessages((prev) => [
                     ...prev,
@@ -368,7 +541,17 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 ]);
             }
 
-            const response = await generate(query);
+            let response: string;
+
+            if (isImageAttachment && modelSupportsVision && attachment) {
+                // Vision path: send image + text together
+                const imagePath = attachment.uri.replace('file://', '');
+                response = await generateWithVision(query || 'Describe this image.', imagePath);
+            } else {
+                // Text-only path (existing flow)
+                response = await generate(query);
+            }
+
             setMessages((prev) => [
                 ...prev,
                 { id: assistantMsgId, role: 'assistant', text: response },
@@ -388,16 +571,20 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
     }, [
         inputText,
+        pendingAttachment,
         isGenerating,
         currentStatus,
         loadModel,
         selectedModel.fileName,
         selectedModel.id,
         selectedModel.name,
+        selectedModel.supportsVision,
         generate,
+        generateWithVision,
         streamedText,
         dispatch,
         preferredBackend,
+        animateInputHeight,
     ]);
 
     // Memoized dynamic styles
@@ -556,13 +743,42 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         {msg.role === 'assistant' ? (
                                             <MessageRenderer content={msg.text} />
                                         ) : (
-                                            <Text
-                                                style={[
-                                                    styles.messageText,
-                                                    { color: colors.text },
-                                                ]}>
-                                                {msg.text}
-                                            </Text>
+                                            <View>
+                                                {/* Attachment preview inside user bubble */}
+                                                {msg.attachment && (
+                                                    SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
+                                                        <Image
+                                                            source={{ uri: msg.attachment.uri }}
+                                                            style={styles.chatImagePreview}
+                                                            resizeMode="cover"
+                                                        />
+                                                    ) : (
+                                                        <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
+                                                            <FileIcon color={colors.primary} />
+                                                            <View style={styles.chatFileInfo}>
+                                                                <Text style={[styles.chatFileName, { color: colors.text }]} numberOfLines={1}>
+                                                                    {msg.attachment.name}
+                                                                </Text>
+                                                                {msg.attachment.size != null && (
+                                                                    <Text style={[styles.chatFileSize, { color: colors.secondaryText }]}>
+                                                                        {(msg.attachment.size / 1024).toFixed(0)} KB
+                                                                    </Text>
+                                                                )}
+                                                            </View>
+                                                        </View>
+                                                    )
+                                                )}
+                                                {msg.text.length > 0 && (
+                                                    <Text
+                                                        style={[
+                                                            styles.messageText,
+                                                            { color: colors.text },
+                                                            msg.attachment ? { marginTop: 8 } : undefined,
+                                                        ]}>
+                                                        {msg.text}
+                                                    </Text>
+                                                )}
+                                            </View>
                                         )}
                                     </View>
                                 ))}
@@ -612,67 +828,126 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                             styles.inputContainer,
                             {
                                 width: widthAnim,
+                                height: inputHeightAnim,
                                 backgroundColor: colors.card,
                                 borderColor: colors.border,
                                 bottom: insets.bottom,
                                 alignSelf: 'center',
                             },
                         ]}>
-                        {/* Plus button inside pill */}
-                        <Pressable
-                            hitSlop={HIT_SLOP_10}
-                            style={styles.iconButton}>
-                            <PlusIcon color={secondaryTextColor} />
-                        </Pressable>
-
-                        {/* TextInput */}
-                        <TextInput
-                            style={[styles.input, { color: colors.text }]}
-                            placeholder="Message AI..."
-                            placeholderTextColor={secondaryTextColor}
-                            value={inputText}
-                            onChangeText={setInputText}
-                            onSubmitEditing={handleSend}
-                            returnKeyType="send"
-                            onFocus={expand}
-                            onBlur={collapse}
-                        />
-
-                        {/* Action Icon: Send / Stop / Mic */}
-                        {isGenerating ? (
-                            <Pressable
-                                hitSlop={HIT_SLOP_10}
-                                onPress={stopGeneration}
-                                style={styles.iconButton}>
-                                <StopIcon color="#FF453A" />
-                            </Pressable>
-                        ) : inputText.trim().length > 0 ? (
-                            <Pressable
-                                hitSlop={HIT_SLOP_10}
-                                onPress={handleSend}
-                                style={styles.iconButton}>
-                                <SendIcon color="#10A37F" />
-                            </Pressable>
-                        ) : (
-                            <Pressable
-                                hitSlop={HIT_SLOP_10}
-                                style={styles.iconButton}>
-                                <MicIcon color={secondaryTextColor} />
-                            </Pressable>
+                        {/* Attachment Preview (above input row) */}
+                        {pendingAttachment && (
+                            <View style={styles.attachmentPreviewRow}>
+                                {SUPPORTED_IMAGE_TYPES.includes(pendingAttachment.type.toLowerCase()) ? (
+                                    <Image
+                                        source={{ uri: pendingAttachment.uri }}
+                                        style={styles.previewThumbnail}
+                                        resizeMode="cover"
+                                    />
+                                ) : (
+                                    <View style={[styles.previewFileCard, { backgroundColor: colors.background }]}>
+                                        <FileIcon color={colors.primary} />
+                                        <Text style={[styles.previewFileName, { color: colors.text }]} numberOfLines={1}>
+                                            {pendingAttachment.name}
+                                        </Text>
+                                    </View>
+                                )}
+                                <Pressable
+                                    onPress={handleRemoveAttachment}
+                                    style={[styles.previewCloseBtn, { backgroundColor: colors.background }]}
+                                    hitSlop={HIT_SLOP_8}>
+                                    <CloseIcon color={colors.text} size={12} />
+                                </Pressable>
+                            </View>
                         )}
 
-                        {/* Headphone Audio Button */}
-                        <Pressable
-                            hitSlop={HIT_SLOP_8}
-                            style={[
-                                styles.headphoneButton,
-                                { backgroundColor: headphoneBgColor },
-                            ]}>
-                            <HeadphoneIcon color={headphoneIconColor} />
-                        </Pressable>
+                        {/* Input Row */}
+                        <View style={styles.inputRow}>
+                            {/* Plus button inside pill */}
+                            <Pressable
+                                hitSlop={HIT_SLOP_10}
+                                onPress={handleOpenPlusMenu}
+                                style={styles.iconButton}>
+                                <PlusIcon color={secondaryTextColor} />
+                            </Pressable>
+
+                            {/* TextInput */}
+                            <TextInput
+                                style={[styles.input, { color: colors.text }]}
+                                placeholder="Message AI..."
+                                placeholderTextColor={secondaryTextColor}
+                                value={inputText}
+                                onChangeText={setInputText}
+                                onSubmitEditing={handleSend}
+                                returnKeyType="send"
+                                onFocus={expand}
+                                onBlur={collapse}
+                            />
+
+                            {/* Action Icon: Send / Stop / Mic */}
+                            {isGenerating ? (
+                                <Pressable
+                                    hitSlop={HIT_SLOP_10}
+                                    onPress={stopGeneration}
+                                    style={styles.iconButton}>
+                                    <StopIcon color="#FF453A" />
+                                </Pressable>
+                            ) : (inputText.trim().length > 0 || pendingAttachment) ? (
+                                <Pressable
+                                    hitSlop={HIT_SLOP_10}
+                                    onPress={handleSend}
+                                    style={styles.iconButton}>
+                                    <SendIcon color="#10A37F" />
+                                </Pressable>
+                            ) : (
+                                <Pressable
+                                    hitSlop={HIT_SLOP_10}
+                                    style={styles.iconButton}>
+                                    <MicIcon color={secondaryTextColor} />
+                                </Pressable>
+                            )}
+
+                            {/* Headphone Audio Button */}
+                            <Pressable
+                                hitSlop={HIT_SLOP_8}
+                                style={[
+                                    styles.headphoneButton,
+                                    { backgroundColor: headphoneBgColor },
+                                ]}>
+                                <HeadphoneIcon color={headphoneIconColor} />
+                            </Pressable>
+                        </View>
                     </Animated.View>
                 </View>
 
+                {/* Plus Menu Popup */}
+                <Modal
+                    visible={isPlusMenuVisible}
+                    transparent
+                    animationType="fade"
+                    statusBarTranslucent
+                    onRequestClose={handleClosePlusMenu}>
+                    <Pressable style={styles.plusMenuBackdrop} onPress={handleClosePlusMenu}>
+                        <View
+                            style={[
+                                styles.plusMenuContainer,
+                                {
+                                    backgroundColor: colors.card,
+                                    borderColor: colors.border,
+                                    bottom: insets.bottom + INPUT_HEIGHT_NORMAL + 8,
+                                },
+                            ]}>
+                            <Pressable
+                                style={styles.plusMenuItem}
+                                onPress={handlePickFile}>
+                                <UploadIcon color={colors.primary} />
+                                <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
+                                    Upload files
+                                </Text>
+                            </Pressable>
+                        </View>
+                    </Pressable>
+                </Modal>
 
                 {/* LLM Model Selector Modal */}
                 <ModelSelectorModal
@@ -869,15 +1144,20 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
     },
     inputContainer: {
-        height: 40.5,
-        flexDirection: 'row',
-        alignItems: 'center',
+        flexDirection: 'column',
         borderRadius: 20.25,
         borderWidth: 1,
-        paddingLeft: 12,
-        paddingRight: 4,
+        paddingHorizontal: 4,
         position: 'absolute',
-        zIndex: 1000
+        zIndex: 1000,
+        overflow: 'hidden',
+        justifyContent: 'flex-end',
+    },
+    inputRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        height: INPUT_HEIGHT_NORMAL,
+        paddingLeft: 8,
     },
     input: {
         flex: 1,
@@ -1094,6 +1374,187 @@ const styles = StyleSheet.create({
         width: 3.8,
         height: 7,
         borderRadius: 1.9,
+    },
+    // --- Attachment Preview (inside input pill) ---
+    attachmentPreviewRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 8,
+        paddingTop: 8,
+        paddingBottom: 4,
+        gap: 8,
+    },
+    previewThumbnail: {
+        width: 64,
+        height: 64,
+        borderRadius: 10,
+    },
+    previewFileCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 10,
+        paddingVertical: 8,
+        borderRadius: 10,
+        gap: 8,
+        flex: 1,
+    },
+    previewFileName: {
+        fontSize: 12,
+        fontWeight: '500',
+        flexShrink: 1,
+    },
+    previewCloseBtn: {
+        position: 'absolute',
+        top: 6,
+        right: 6,
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        justifyContent: 'center',
+        alignItems: 'center',
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.15,
+        shadowRadius: 2,
+    },
+    // --- Plus Menu Popup ---
+    plusMenuBackdrop: {
+        ...StyleSheet.absoluteFill,
+        backgroundColor: 'rgba(0,0,0,0.25)',
+        justifyContent: 'flex-end',
+        alignItems: 'flex-start',
+    },
+    plusMenuContainer: {
+        marginLeft: 24,
+        borderRadius: 14,
+        borderWidth: 1,
+        paddingVertical: 4,
+        minWidth: 180,
+        elevation: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+    },
+    plusMenuItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 14,
+        paddingHorizontal: 16,
+        gap: 12,
+    },
+    plusMenuItemText: {
+        fontSize: 15,
+        fontWeight: '500',
+    },
+    // --- Chat Attachment Rendering ---
+    chatImagePreview: {
+        width: '100%',
+        height: 180,
+        borderRadius: 12,
+    },
+    chatFileCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        borderRadius: 10,
+        borderWidth: 1,
+        gap: 10,
+    },
+    chatFileInfo: {
+        flex: 1,
+    },
+    chatFileName: {
+        fontSize: 13,
+        fontWeight: '600',
+    },
+    chatFileSize: {
+        fontSize: 11,
+        marginTop: 2,
+    },
+    // --- Upload Icon ---
+    uploadIconContainer: {
+        width: 20,
+        height: 20,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    uploadArrowStem: {
+        width: 2,
+        height: 9,
+        borderRadius: 1,
+        position: 'absolute',
+        top: 1,
+    },
+    uploadArrowLeft: {
+        position: 'absolute',
+        width: 2,
+        height: 5.5,
+        borderRadius: 1,
+        top: 1,
+        left: 5.5,
+        transform: [{ rotate: '45deg' }],
+    },
+    uploadArrowRight: {
+        position: 'absolute',
+        width: 2,
+        height: 5.5,
+        borderRadius: 1,
+        top: 1,
+        right: 5.5,
+        transform: [{ rotate: '-45deg' }],
+    },
+    uploadTray: {
+        position: 'absolute',
+        bottom: 1,
+        width: 16,
+        height: 6,
+        borderBottomLeftRadius: 3,
+        borderBottomRightRadius: 3,
+        borderWidth: 1.5,
+        borderTopWidth: 0,
+    },
+    // --- Close Icon ---
+    closeIconContainer: {
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    closeLine1: {
+        position: 'absolute',
+        height: 1.8,
+        borderRadius: 1,
+        transform: [{ rotate: '45deg' }],
+    },
+    closeLine2: {
+        position: 'absolute',
+        height: 1.8,
+        borderRadius: 1,
+        transform: [{ rotate: '-45deg' }],
+    },
+    // --- File Icon ---
+    fileIconContainer: {
+        width: 20,
+        height: 24,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    fileBody: {
+        width: 16,
+        height: 20,
+        borderRadius: 2,
+        borderWidth: 1.5,
+    },
+    fileFold: {
+        position: 'absolute',
+        top: 0,
+        right: 0,
+        width: 7,
+        height: 7,
+        borderBottomLeftRadius: 2,
+        borderLeftWidth: 1.5,
+        borderBottomWidth: 1.5,
     },
 });
 

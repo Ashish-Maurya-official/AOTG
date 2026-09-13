@@ -513,7 +513,9 @@ class LLMModule(
                             val config = EngineConfig(
                                 modelPath = file.absolutePath,
                                 backend = createBackend(targetBackend),
-                                maxNumTokens = MAX_NUM_TOKENS
+                                visionBackend = createBackend(targetBackend),
+                                maxNumTokens = MAX_NUM_TOKENS,
+                                maxNumImages = 1
                             )
                             eng = Engine(config)
                             eng.initialize()
