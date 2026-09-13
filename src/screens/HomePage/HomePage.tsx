@@ -45,8 +45,31 @@ import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
 import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
+import Zoom from 'react-native-zoom-reanimated';
 
-const { width } = Dimensions.get('window');
+const { width, height: windowHeight } = Dimensions.get('window');
+
+const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) => {
+    const [aspectRatio, setAspectRatio] = useState<number>(1);
+
+    useEffect(() => {
+        Image.getSize(uri, (w, h) => {
+            if (w && h) {
+                setAspectRatio(w / h);
+            }
+        }, () => {});
+    }, [uri]);
+
+    return (
+        <Pressable onPress={onPress}>
+            <Image
+                source={{ uri }}
+                style={[styles.chatImagePreview, { aspectRatio }]}
+                resizeMode="contain"
+            />
+        </Pressable>
+    );
+});
 
 // --- Static Constants ---
 const EXPANDED_WIDTH = width * 0.85;
@@ -211,6 +234,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
     const [isPlusMenuVisible, setIsPlusMenuVisible] = useState(false);
+    const [showStopButton, setShowStopButton] = useState(false);
+    const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
@@ -747,10 +772,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                                 {/* Attachment preview inside user bubble */}
                                                 {msg.attachment && (
                                                     SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
-                                                        <Image
-                                                            source={{ uri: msg.attachment.uri }}
-                                                            style={styles.chatImagePreview}
-                                                            resizeMode="cover"
+                                                        <ChatImage
+                                                            uri={msg.attachment.uri}
+                                                            onPress={() => setFullscreenImage(msg.attachment!.uri)}
                                                         />
                                                     ) : (
                                                         <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
@@ -965,6 +989,33 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 onOpenAgent={onOpenAgent}
                 onNewChat={handleNewChat}
             />
+
+            {/* Fullscreen Image Preview Modal */}
+            <Modal visible={!!fullscreenImage} transparent={true} animationType="fade">
+                <View style={styles.fullscreenModalContainer}>
+                    <Pressable
+                        style={styles.fullscreenCloseButton}
+                        onPress={() => setFullscreenImage(null)}
+                    >
+                        <Text style={styles.fullscreenCloseText}>Close</Text>
+                    </Pressable>
+
+                    {fullscreenImage && (
+                        <Zoom 
+                            minScale={1}
+                            maxScale={5}
+                            doubleTapConfig={{ defaultScale: 2, minZoomScale: 1, maxZoomScale: 5 }}
+                            style={{ flex: 1, width: width, position: 'relative' }}
+                        >
+                            <Image
+                                source={{ uri: fullscreenImage }}
+                                style={styles.fullscreenImage}
+                                resizeMode="contain"
+                            />
+                        </Zoom>
+                    )}
+                </View>
+            </Modal>
         </View>
     );
 };
@@ -1450,9 +1501,9 @@ const styles = StyleSheet.create({
     },
     // --- Chat Attachment Rendering ---
     chatImagePreview: {
-        width: '100%',
         height: 180,
         borderRadius: 12,
+        alignSelf: 'flex-start',
     },
     chatFileCard: {
         flexDirection: 'row',
@@ -1555,6 +1606,36 @@ const styles = StyleSheet.create({
         borderBottomLeftRadius: 2,
         borderLeftWidth: 1.5,
         borderBottomWidth: 1.5,
+    },
+    // --- Fullscreen Modal ---
+    fullscreenModalContainer: {
+        flex: 1,
+        backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    },
+    fullscreenZoomContainer: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    fullscreenImage: {
+        width: width,
+        height: windowHeight,
+    },
+    fullscreenCloseButton: {
+        position: 'absolute',
+        top: Platform.OS === 'ios' ? 60 : 40,
+        right: 20,
+        zIndex: 100,
+        elevation: 10,
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        backgroundColor: 'rgba(255, 255, 255, 0.25)',
+        borderRadius: 20,
+    },
+    fullscreenCloseText: {
+        color: '#FFF',
+        fontWeight: 'bold',
+        fontSize: 16,
     },
 });
 
