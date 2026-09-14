@@ -105,6 +105,14 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
+
+    // Shorten CMake intermediate build path to avoid Windows 260-char MAX_PATH
+    // limit with deeply nested codegen paths (e.g. react-native-gesture-handler).
+    externalNativeBuild {
+        cmake {
+            buildStagingDirectory = file("C:/tmp/aotg-cxx")
+        }
+    }
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {

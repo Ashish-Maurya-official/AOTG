@@ -6,6 +6,7 @@ import android.provider.Settings
 import android.util.Log
 import com.ashish.technologies.aotg.NativeAccessibilitySpec
 import com.ashish.technologies.aotg.services.AOTGAccessibilityService
+import com.ashish.technologies.aotg.services.AgentForegroundService
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -229,21 +230,13 @@ class AccessibilityModule(
         executor.execute {
             try {
                 val service = getServiceOrReject(promise) ?: return@execute
-                val base64 = service.captureScreenshot()
-                if (base64 == null) {
+                val filePath = service.captureScreenshotToFile(reactContext.cacheDir)
+                if (filePath != null) {
+                    Log.d(TAG, "Screenshot saved to $filePath")
+                    promise.resolve(filePath)
+                } else {
                     promise.reject("ERR_SCREENSHOT", "Screenshot capture failed (requires API 30+)")
-                    return@execute
                 }
-
-                // Decode base64 → JPEG bytes → write to cache file
-                val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
-                val cacheDir = reactContext.cacheDir
-                cacheDir.mkdirs()
-                val outFile = java.io.File(cacheDir, "agent_screenshot.jpg")
-                java.io.FileOutputStream(outFile).use { it.write(bytes) }
-
-                Log.d(TAG, "Screenshot saved to ${outFile.absolutePath} (${bytes.size} bytes)")
-                promise.resolve(outFile.absolutePath)
             } catch (e: Exception) {
                 Log.e(TAG, "takeScreenshotToFile error: ${e.message}", e)
                 promise.reject("ERR_SCREENSHOT_FILE", e.message, e)
@@ -264,6 +257,36 @@ class AccessibilityModule(
             promise.resolve(service.getCurrentAppPackage())
         } catch (e: Exception) {
             promise.reject("ERR_GET_APP", e.message, e)
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Agent Foreground Service
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Starts a foreground service to keep the RN process alive while the agent runs.
+     */
+    override fun startAgentService(promise: Promise) {
+        try {
+            AgentForegroundService.start(reactContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "startAgentService error: ${e.message}", e)
+            promise.reject("ERR_START_SERVICE", e.message, e)
+        }
+    }
+
+    /**
+     * Stops the agent foreground service.
+     */
+    override fun stopAgentService(promise: Promise) {
+        try {
+            AgentForegroundService.stop(reactContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "stopAgentService error: ${e.message}", e)
+            promise.reject("ERR_STOP_SERVICE", e.message, e)
         }
     }
 

@@ -39,9 +39,16 @@ export interface Spec extends TurboModule {
   // App info
   getCurrentApp(): Promise<string>;
 
+  // Agent foreground service control
+  /** Starts a foreground service to keep the RN process alive while the agent runs */
+  startAgentService(): Promise<boolean>;
+  /** Stops the agent foreground service */
+  stopAgentService(): Promise<boolean>;
+
   // Event emitter support
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('Accessibility');
+

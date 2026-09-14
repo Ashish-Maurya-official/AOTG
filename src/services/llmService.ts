@@ -246,27 +246,43 @@ class LLMServiceImpl {
   ): Promise<string> {
     return new Promise(async (resolve, reject) => {
       let unsubscribe: (() => void) | null = null;
+      let settled = false;
+
+      const cleanup = () => {
+        if (unsubscribe) {
+          unsubscribe();
+          unsubscribe = null;
+        }
+      };
 
       try {
         unsubscribe = await this.startGeneration(
           prompt,
           (event) => {
+            if (settled) return;
             if (onStream) {
               onStream(event.token);
             }
           },
           (event) => {
-            if (unsubscribe) unsubscribe();
+            if (settled) return;
+            settled = true;
+            cleanup();
             resolve(event.fullText);
           },
           (errorEvent) => {
-            if (unsubscribe) unsubscribe();
+            if (settled) return;
+            settled = true;
+            cleanup();
             reject(new Error(errorEvent.error));
           }
         );
       } catch (err) {
-        if (unsubscribe) unsubscribe();
-        reject(err);
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
       }
     });
   }
@@ -286,22 +302,33 @@ class LLMServiceImpl {
   ): Promise<string> {
     return new Promise(async (resolve, reject) => {
       const subscriptions: {remove: () => void}[] = [];
+      let settled = false;
+
+      const cleanup = () => {
+        subscriptions.forEach(s => s.remove());
+        subscriptions.length = 0;
+      };
 
       if (this.eventEmitter) {
         subscriptions.push(
           this.eventEmitter.addListener('onToken', (data: any) => {
+            if (settled) return;
             if (onStream) onStream(data.token);
           })
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
-            subscriptions.forEach(s => s.remove());
+            if (settled) return;
+            settled = true;
+            cleanup();
             resolve(data.fullText);
           })
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationError', (data: any) => {
-            subscriptions.forEach(s => s.remove());
+            if (settled) return;
+            settled = true;
+            cleanup();
             reject(new Error(data.error));
           })
         );
@@ -310,8 +337,11 @@ class LLMServiceImpl {
       try {
         await NativeLLM.startGenerationWithImage(prompt, imagePath);
       } catch (err) {
-        subscriptions.forEach(s => s.remove());
-        reject(err);
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
       }
     });
   }

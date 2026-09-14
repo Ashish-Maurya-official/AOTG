@@ -553,7 +553,15 @@ class LLMModule(
 
                     val wasFallback = !successfulBackend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
 
-                    val params = Arguments.createMap().apply {
+                    val eventParams = Arguments.createMap().apply {
+                        putBoolean("success", true)
+                        putString("modelPath", file.absolutePath)
+                        putString("requestedBackend", backend)
+                        putString("actualBackend", successfulBackend)
+                        putBoolean("wasFallback", wasFallback)
+                    }
+
+                    val promiseParams = Arguments.createMap().apply {
                         putBoolean("success", true)
                         putString("modelPath", file.absolutePath)
                         putString("requestedBackend", backend)
@@ -562,8 +570,8 @@ class LLMModule(
                     }
 
                     Log.i(TAG, "Model loaded. Native heap: ${Debug.getNativeHeapAllocatedSize() / 1048576} MB")
-                    sendEvent(EVENT_ON_MODEL_LOADED, params)
-                    promise.resolve(params)
+                    sendEvent(EVENT_ON_MODEL_LOADED, eventParams)
+                    promise.resolve(promiseParams)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize LiteRT-LM model: ${e.message}", e)
@@ -836,16 +844,14 @@ class LLMModule(
     }
 
     private fun sendEvent(eventName: String, params: WritableMap?) {
-        if (reactContext.hasActiveReactInstance()) {
-            mainHandler.post {
-                try {
-                    reactContext
-                        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                        ?.emit(eventName, params)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error emitting event $eventName: ${e.message}")
-                }
+        try {
+            if (reactContext.hasActiveReactInstance()) {
+                reactContext
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    ?.emit(eventName, params)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error emitting event $eventName: ${e.message}")
         }
     }
 }
