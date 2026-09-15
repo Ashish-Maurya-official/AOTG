@@ -19,6 +19,8 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -144,7 +146,24 @@ class AOTGAccessibilityService : AccessibilityService() {
      * }
      */
     fun getUITree(): String {
-        val root = rootInActiveWindow ?: return buildEmptyTree("No active window")
+        // rootInActiveWindow must be accessed on the main thread on some OEMs
+        // to avoid returning null or stale data. Fetch it there, then serialize
+        // on the caller's background thread.
+        val rootRef = AtomicReference<AccessibilityNodeInfo?>(null)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            rootRef.set(rootInActiveWindow)
+        } else {
+            val latch = CountDownLatch(1)
+            mainHandler.post {
+                rootRef.set(rootInActiveWindow)
+                latch.countDown()
+            }
+            if (!latch.await(3, TimeUnit.SECONDS)) {
+                return buildEmptyTree("Timed out fetching root window")
+            }
+        }
+
+        val root = rootRef.get() ?: return buildEmptyTree("No active window")
 
         val result = JSONObject()
         val elements = JSONArray()
@@ -481,7 +500,7 @@ class AOTGAccessibilityService : AccessibilityService() {
                 result.set(false)
                 latch.countDown()
             }
-        }, null)
+        }, mainHandler)
 
         latch.await(3, TimeUnit.SECONDS)
         return result.get()
@@ -517,7 +536,7 @@ class AOTGAccessibilityService : AccessibilityService() {
                 result.set(false)
                 latch.countDown()
             }
-        }, null)
+        }, mainHandler)
 
         latch.await(durationMs + 3000, TimeUnit.MILLISECONDS)
         return result.get()
@@ -582,6 +601,62 @@ class AOTGAccessibilityService : AccessibilityService() {
 
                 override fun onFailure(errorCode: Int) {
                     Log.e(TAG, "Screenshot failed with error code: $errorCode")
+                    latch.countDown()
+                }
+            }
+        )
+
+        latch.await(5, TimeUnit.SECONDS)
+        return resultRef.get()
+    }
+
+    /**
+     * Captures a screenshot and saves it directly to the given cache directory
+     * as a JPEG, skipping the base64 round-trip for efficiency.
+     *
+     * @return Absolute file path, or null on failure.
+     */
+    fun captureScreenshotToFile(cacheDir: File): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.w(TAG, "captureScreenshotToFile requires API 30+")
+            return null
+        }
+
+        val resultRef = AtomicReference<String?>(null)
+        val latch = CountDownLatch(1)
+
+        takeScreenshot(
+            android.view.Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    try {
+                        val hardwareBuffer = screenshot.hardwareBuffer
+                        val colorSpace = screenshot.colorSpace
+                        val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+                        hardwareBuffer.close()
+
+                        if (bitmap != null) {
+                            val scaledBitmap = scaleBitmap(bitmap, 720)
+                            cacheDir.mkdirs()
+                            val outFile = File(cacheDir, "agent_screenshot.jpg")
+                            FileOutputStream(outFile).use { fos ->
+                                scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 70, fos)
+                            }
+                            resultRef.set(outFile.absolutePath)
+
+                            if (scaledBitmap !== bitmap) scaledBitmap.recycle()
+                            bitmap.recycle()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error saving screenshot to file: ${e.message}", e)
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    Log.e(TAG, "Screenshot to file failed with error code: $errorCode")
                     latch.countDown()
                 }
             }

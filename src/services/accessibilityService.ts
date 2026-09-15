@@ -237,6 +237,37 @@ class AccessibilityServiceImpl {
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Agent Foreground Service
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Starts a foreground service to keep the RN process alive while the
+   * agent operates in the background (observing and interacting with
+   * other apps).
+   */
+  async startAgentService(): Promise<boolean> {
+    try {
+      return await NativeAccessibility.startAgentService();
+    } catch (err) {
+      console.error('[AccessibilityService] startAgentService error:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Stops the agent foreground service. Should be called when the agent
+   * execution completes, fails, or is cancelled.
+   */
+  async stopAgentService(): Promise<boolean> {
+    try {
+      return await NativeAccessibility.stopAgentService();
+    } catch (err) {
+      console.error('[AccessibilityService] stopAgentService error:', err);
+      return false;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Event Subscriptions
   // ─────────────────────────────────────────────────────────────
 
@@ -270,3 +301,4 @@ class AccessibilityServiceImpl {
 
 export const AccessibilityService = new AccessibilityServiceImpl();
 export default AccessibilityService;
+

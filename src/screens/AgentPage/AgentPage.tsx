@@ -371,6 +371,7 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
       const cmd = text || instruction.trim();
       if (!cmd) return;
 
+      console.log('[AgentPage] 🚀 Dispatching startExecution:', cmd);
       dispatch(
         startExecution({
           instruction: cmd,
@@ -385,26 +386,50 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
         ...DEFAULT_AGENT_CONFIG,
         useVision: !!loadedModel?.supportsVision,
       };
+      console.log('[AgentPage]   Model:', loadedModel?.name, '| useVision:', config.useVision);
 
-      const result = await agentOrchestrator.execute(
-        cmd,
-        (step: AgentStep) => {
-          dispatch(updateStep(step));
-        },
-        config,
-      );
+      try {
+        const result = await agentOrchestrator.execute(
+          cmd,
+          (step: AgentStep) => {
+            console.log(`[AgentPage] Step update: #${step.stepIndex} status=${step.status}${step.action ? ' action=' + step.action.type : ''}`);
+            dispatch(updateStep(step));
+          },
+          config,
+        );
 
-      dispatch(completeExecution(result));
+        console.log('[AgentPage] ✅ Execution complete:', result.success ? 'SUCCESS' : 'FAILED', '|', result.summary);
+        dispatch(completeExecution(result));
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        console.error('[AgentPage] ❌ Execution threw:', errMsg);
+        dispatch(
+          completeExecution({
+            success: false,
+            steps: [],
+            summary:
+              err instanceof Error
+                ? err.message
+                : 'Agent execution failed unexpectedly',
+            error:
+              err instanceof Error ? err.message : 'Unknown error',
+            startTime: Date.now(),
+            endTime: Date.now(),
+          }),
+        );
+      }
     },
     [instruction, dispatch, serviceEnabled, loadedModelId],
   );
 
   const handleCancel = useCallback(() => {
+    console.log('[AgentPage] ⏹️ Cancel button pressed');
     agentOrchestrator.cancel();
     dispatch(cancelExecution());
   }, [dispatch]);
 
   const handleReset = useCallback(() => {
+    console.log('[AgentPage] 🔄 Reset button pressed');
     dispatch(resetAgent());
     setInstruction('');
   }, [dispatch]);
