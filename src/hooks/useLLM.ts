@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
 import LLMService, { BackendType, TokenEvent } from '../services/llmService';
 import { InitializeResult } from '../native/turbo_modules/LLM/NativeLLM';
 
@@ -34,6 +35,64 @@ export const useLLM = (): UseLLMReturn => {
       }
     };
   }, []);
+
+  // Handle AppState changes to recover background generation
+  useEffect(() => {
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        try {
+          const state = await LLMService.getGenerationState();
+          
+          if (state.isGenerating) {
+            setIsGenerating(true);
+            setStreamedText(state.text);
+            
+            // If we don't have an active subscription, re-subscribe
+            if (!cleanupRef.current) {
+              cleanupRef.current = LLMService.subscribeToGeneration(
+                (event) => {
+                  setStreamedText(event.text);
+                },
+                (completeEvent) => {
+                  setIsGenerating(false);
+                  setStreamedText(completeEvent.fullText);
+                  if (cleanupRef.current) {
+                    cleanupRef.current();
+                    cleanupRef.current = null;
+                  }
+                },
+                (errorEvent) => {
+                  setIsGenerating(false);
+                  setError(errorEvent.error);
+                  if (cleanupRef.current) {
+                    cleanupRef.current();
+                    cleanupRef.current = null;
+                  }
+                }
+              );
+            }
+          } else if (!state.isGenerating && isGenerating) {
+            // Generation finished while we were in background
+            setIsGenerating(false);
+            if (state.text) {
+               setStreamedText(state.text);
+            }
+          }
+        } catch (err) {
+          console.warn('[useLLM] Error recovering generation state', err);
+        }
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    
+    // Also check immediately on mount just in case we missed the transition
+    handleAppStateChange(AppState.currentState);
+
+    return () => {
+      subscription.remove();
+    };
+  }, [isGenerating]);
 
   const loadModel = useCallback(
     async (modelPath: string, backend: BackendType = 'AUTO'): Promise<InitializeResult> => {

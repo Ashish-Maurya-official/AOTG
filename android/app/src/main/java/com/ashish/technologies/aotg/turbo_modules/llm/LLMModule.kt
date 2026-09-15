@@ -21,6 +21,11 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import com.ashish.technologies.aotg.services.LLMForegroundService
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -94,6 +99,30 @@ class LLMModule(
     private var currentBackend: String = "AUTO"
     @Volatile private var activeBackend: String = "CPU"
     private var listenerCount = 0
+
+    private val cancelReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == LLMForegroundService.ACTION_CANCEL_GENERATION) {
+                Log.i(TAG, "Received generation cancel request from LLMForegroundService")
+                stopGenerationInternal()
+            }
+        }
+    }
+
+    init {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            reactContext.registerReceiver(
+                cancelReceiver,
+                IntentFilter(LLMForegroundService.ACTION_CANCEL_GENERATION),
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            reactContext.registerReceiver(
+                cancelReceiver,
+                IntentFilter(LLMForegroundService.ACTION_CANCEL_GENERATION)
+            )
+        }
+    }
 
     /** True while a generation job is alive (including the wind-down after a stop). */
     private fun isGenerationActive(): Boolean = currentSession?.job?.isActive == true
@@ -195,6 +224,11 @@ class LLMModule(
 
     /** Called by React Native when the module/bridge is torn down (e.g. dev reload). */
     override fun invalidate() {
+        try {
+            reactContext.unregisterReceiver(cancelReceiver)
+        } catch (e: Exception) {
+            // Ignore if not registered
+        }
         try {
             runBlocking { withTimeoutOrNull(4000L) { stopGenerationAndAwait(3000L) } }
             releaseEngineResources()
@@ -640,6 +674,10 @@ class LLMModule(
                 }
 
                 Log.d(TAG, "Executing LiteRT-LM inference on backend: $activeBackend")
+                LLMForegroundService.start(reactContext)
+
+                var lastEmitTime = System.currentTimeMillis()
+                val pendingTokenText = StringBuilder()
 
                 conv.sendMessageAsync(buildContents()).collect { message ->
                     val chunkText = message.toString()
@@ -648,9 +686,24 @@ class LLMModule(
                     }
 
                     session.text.append(chunkText)
+                    pendingTokenText.append(chunkText)
 
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmitTime >= 150) {
+                        val tokenMap = Arguments.createMap().apply {
+                            putString("token", pendingTokenText.toString())
+                            putString("text", session.text.toString())
+                            putBoolean("isFinished", false)
+                        }
+                        sendEvent(EVENT_ON_TOKEN, tokenMap)
+                        pendingTokenText.clear()
+                        lastEmitTime = now
+                    }
+                }
+
+                if (!session.stop.get() && pendingTokenText.isNotEmpty()) {
                     val tokenMap = Arguments.createMap().apply {
-                        putString("token", chunkText)
+                        putString("token", pendingTokenText.toString())
                         putString("text", session.text.toString())
                         putBoolean("isFinished", false)
                     }
@@ -678,6 +731,7 @@ class LLMModule(
                     })
                 }
             } finally {
+                LLMForegroundService.stop(reactContext)
                 // If this generation was cancelled, proactively reset the
                 // conversation so it is in a clean state for the next run
                 // (whether or not a new run is already waiting).
@@ -719,16 +773,12 @@ class LLMModule(
     }
 
     /**
-     * Stops the active generation. Signals the native runtime via cancelProcess()
-     * (so it really stops decoding, instead of only cancelling the Kotlin flow)
-     * and immediately emits the terminal events with the partial text so any JS
-     * caller awaiting generate() resolves.
+     * Internal stop logic used by both JS promise and BroadcastReceiver
      */
-    override fun stopGeneration(promise: Promise) {
+    private fun stopGenerationInternal(): Boolean {
         val session = currentSession
         if (session == null || session.job?.isActive != true || session.stop.get()) {
-            promise.resolve(false)
-            return
+            return false
         }
 
         session.stop.set(true)
@@ -746,7 +796,18 @@ class LLMModule(
             putString("fullText", partial)
             putBoolean("isFinished", true)
         })
-        promise.resolve(true)
+        LLMForegroundService.stop(reactContext)
+        return true
+    }
+
+    /**
+     * Stops the active generation. Signals the native runtime via cancelProcess()
+     * (so it really stops decoding, instead of only cancelling the Kotlin flow)
+     * and immediately emits the terminal events with the partial text so any JS
+     * caller awaiting generate() resolves.
+     */
+    override fun stopGeneration(promise: Promise) {
+        promise.resolve(stopGenerationInternal())
     }
 
     /**
@@ -754,6 +815,19 @@ class LLMModule(
      */
     override fun isGenerating(promise: Promise) {
         promise.resolve(isGenerationBusy())
+    }
+
+    /**
+     * Fetch the active generation state to recover UI on AppState resume.
+     */
+    override fun getGenerationState(promise: Promise) {
+        val active = isGenerationBusy()
+        val text = currentSession?.text?.toString() ?: ""
+        
+        promise.resolve(Arguments.createMap().apply {
+            putBoolean("isGenerating", active)
+            putString("text", text)
+        })
     }
 
     /**

@@ -381,6 +381,63 @@ class LLMServiceImpl {
   }
 
   /**
+   * Fetch the active generation state
+   */
+  public async getGenerationState(): Promise<{ isGenerating: boolean; text: string }> {
+    try {
+      return await NativeLLM.getGenerationState();
+    } catch (err) {
+      return { isGenerating: false, text: '' };
+    }
+  }
+
+  /**
+   * Re-subscribe to an ongoing generation (e.g. after returning from background)
+   */
+  public subscribeToGeneration(
+    onToken?: (event: TokenEvent) => void,
+    onComplete?: (event: GenerationCompleteEvent) => void,
+    onError?: (event: GenerationErrorEvent) => void
+  ): () => void {
+    const subscriptions: { remove: () => void }[] = [];
+    let settled = false;
+
+    if (this.eventEmitter) {
+      if (onToken) {
+        subscriptions.push(
+          this.eventEmitter.addListener('onToken', (data: any) => {
+            onToken(data as TokenEvent);
+          })
+        );
+      }
+
+      if (onComplete) {
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
+            if (settled) return;
+            settled = true;
+            onComplete(data as GenerationCompleteEvent);
+          })
+        );
+      }
+
+      if (onError) {
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationError', (data: any) => {
+            if (settled) return;
+            settled = true;
+            onError(data as GenerationErrorEvent);
+          })
+        );
+      }
+    }
+
+    return () => {
+      subscriptions.forEach((sub) => sub.remove());
+    };
+  }
+
+  /**
    * KV-cache usage of the live conversation
    */
   public async getContextUsage(): Promise<ContextUsage> {

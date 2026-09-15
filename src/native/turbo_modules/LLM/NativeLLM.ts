@@ -38,6 +38,7 @@ export interface Spec extends TurboModule {
   stopGeneration(): Promise<boolean>;
   /** True while the model is actively decoding a response */
   isGenerating(): Promise<boolean>;
+  getGenerationState(): Promise<{ isGenerating: boolean; text: string }>;
   isModelLoaded(): Promise<boolean>;
   /** KV-cache usage of the live conversation */
   getContextUsage(): Promise<ContextUsage>;

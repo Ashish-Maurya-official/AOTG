@@ -43,7 +43,15 @@
       <service
           android:name=".services.AgentForegroundService"
           android:foregroundServiceType="specialUse"
-          android:exported="false" />
+          android:exported="false">
+          <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="AI Agent Automation" />
+      </service>
+      <service
+          android:name=".services.LLMForegroundService"
+          android:foregroundServiceType="specialUse"
+          android:exported="false">
+          <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Local AI Generation" />
+      </service>
     </application>
 </manifest>
 
