@@ -47,8 +47,10 @@ import LinearGradient from 'react-native-linear-gradient';
 import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import Zoom from 'react-native-zoom-reanimated';
-import Reanimated, { ZoomIn, ZoomOut } from 'react-native-reanimated';
+import Reanimated, { ZoomIn, ZoomOut, FadeIn, FadeOut } from 'react-native-reanimated';
 import SendIcon from '../../static/images/SVG/SendIcon';
+import ImageIcon from '../../static/images/SVG/ImageIcon';
+import DocumentIcon from '../../static/images/SVG/DocumentIcon';
 const { width, height: windowHeight } = Dimensions.get('window');
 
 const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) => {
@@ -264,6 +266,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const widthAnim = useRef(new Animated.Value(COLLAPSED_WIDTH)).current;
     const inputHeightAnim = useRef(new Animated.Value(INPUT_HEIGHT_NORMAL)).current;
     const borderRadiusAnim = useRef(new Animated.Value(70)).current;
+    const plusRotationAnim = useRef(new Animated.Value(0)).current;
 
     const scrollViewRef = useRef<ScrollView>(null);
     const isAutoScrollEnabled = useRef(true);
@@ -348,6 +351,25 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             useNativeDriver: false,
         }).start();
     }, [isMultiline, pendingAttachment, borderRadiusAnim]);
+
+    useEffect(() => {
+        Animated.timing(plusRotationAnim, {
+            toValue: isPlusMenuVisible ? 1 : 0,
+            duration: 250,
+            useNativeDriver: true,
+        }).start();
+    }, [isPlusMenuVisible, plusRotationAnim]);
+
+    const plusRotationStyle = {
+        transform: [
+            {
+                rotate: plusRotationAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0deg', '-45deg'],
+                }),
+            },
+        ],
+    };
 
     const handleOpenPlusMenu = useCallback(() => {
         ReactNativeHapticFeedback.trigger('impactLight', {
@@ -874,7 +896,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 <Pressable
                                     onPress={handleOpenPlusMenu}
                                     style={styles.iconButton}>
-                                    <PlusIcon color={secondaryTextColor} />
+                                    <Animated.View style={plusRotationStyle}>
+                                        <PlusIcon color={secondaryTextColor} />
+                                    </Animated.View>
                                 </Pressable>
                             </View>
 
@@ -920,36 +944,52 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                             </View>
                         </View>
                     </Animated.View>
-                </View>
 
-                {/* Plus Menu Popup */}
-                <Modal
-                    visible={isPlusMenuVisible}
-                    transparent
-                    animationType="fade"
-                    statusBarTranslucent
-                    onRequestClose={handleClosePlusMenu}>
-                    <Pressable style={styles.plusMenuBackdrop} onPress={handleClosePlusMenu}>
-                        <View
-                            style={[
-                                styles.plusMenuContainer,
-                                {
-                                    backgroundColor: colors.card,
-                                    borderColor: colors.border,
-                                    bottom: insets.bottom + INPUT_HEIGHT_NORMAL + 8,
-                                },
-                            ]}>
-                            <Pressable
-                                style={styles.plusMenuItem}
-                                onPress={handlePickFile}>
-                                <UploadIcon color={colors.primary} />
-                                <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
-                                    Upload files
-                                </Text>
-                            </Pressable>
-                        </View>
-                    </Pressable>
-                </Modal>
+                    {/* Plus Menu Popup */}
+                    {isPlusMenuVisible && (
+                        <Reanimated.View
+                            entering={FadeIn.duration(250)}
+                            exiting={FadeOut.duration(150)}
+                            style={[StyleSheet.absoluteFill, { zIndex: 1000, elevation: 10 }]}>
+                            <Pressable style={styles.plusMenuBackdrop} onPress={handleClosePlusMenu} />
+                            <Animated.View
+                                style={[
+                                    styles.plusMenuContainer,
+                                    {
+                                        position: 'absolute',
+                                        backgroundColor: colors.card,
+                                        borderColor: colors.border,
+                                        bottom: Animated.add(inputHeightAnim, insets.bottom + 10),
+                                        marginLeft: 0,
+                                        left: widthAnim.interpolate({
+                                            inputRange: [COLLAPSED_WIDTH, EXPANDED_WIDTH],
+                                            outputRange: [(width - COLLAPSED_WIDTH) / 2 + 8, (width - EXPANDED_WIDTH) / 2 + 8],
+                                        }),
+                                    },
+                                ]}>
+                                <Pressable
+                                    style={styles.plusMenuItem}
+                                    onPress={handlePickFile}>
+                                    <ImageIcon size={24} color="#FFFFFF" />
+                                    <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
+                                        Upload Image
+                                    </Text>
+                                </Pressable>
+                                
+                                <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />
+                                
+                                <Pressable
+                                    style={styles.plusMenuItem}
+                                    onPress={handlePickFile}>
+                                    <DocumentIcon size={24} color="#FFFFFF" />
+                                    <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
+                                        Upload Files
+                                    </Text>
+                                </Pressable>
+                            </Animated.View>
+                        </Reanimated.View>
+                    )}
+                </View>
 
                 {/* LLM Model Selector Modal */}
                 <ModelSelectorModal
@@ -1438,27 +1478,26 @@ const styles = StyleSheet.create({
     // --- Plus Menu Popup ---
     plusMenuBackdrop: {
         ...StyleSheet.absoluteFill,
-        backgroundColor: 'rgba(0,0,0,0.25)',
+        backgroundColor: 'rgba(0,0,0,0.01)',
         justifyContent: 'flex-end',
         alignItems: 'flex-start',
+        bottom: 5,
     },
     plusMenuContainer: {
         marginLeft: 24,
-        borderRadius: 14,
+        borderRadius: 10,
         borderWidth: 1,
-        paddingVertical: 4,
         minWidth: 180,
         elevation: 8,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 4 },
         shadowOpacity: 0.15,
         shadowRadius: 12,
+        padding: 10
     },
     plusMenuItem: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingVertical: 14,
-        paddingHorizontal: 16,
         gap: 12,
     },
     plusMenuItemText: {
