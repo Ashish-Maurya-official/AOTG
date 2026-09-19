@@ -29,6 +29,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { useTheme } from '../../theme/ThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '../../store/store';
+import MicIcon from '../../static/images/SVG/MicIcon';
 import {
     AVAILABLE_MODELS,
     setSelectedModel,
@@ -46,7 +47,8 @@ import LinearGradient from 'react-native-linear-gradient';
 import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import Zoom from 'react-native-zoom-reanimated';
-
+import Reanimated, { ZoomIn, ZoomOut } from 'react-native-reanimated';
+import SendIcon from '../../static/images/SVG/SendIcon';
 const { width, height: windowHeight } = Dimensions.get('window');
 
 const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) => {
@@ -57,7 +59,7 @@ const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) 
             if (w && h) {
                 setAspectRatio(w / h);
             }
-        }, () => {});
+        }, () => { });
     }, [uri]);
 
     return (
@@ -72,7 +74,7 @@ const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) 
 });
 
 // --- Static Constants ---
-const EXPANDED_WIDTH = width * 0.85;
+const EXPANDED_WIDTH = width * 0.9;
 const COLLAPSED_WIDTH = width * 0.75;
 const ANIMATION_DURATION = 500;
 
@@ -95,10 +97,6 @@ interface ChatMessage {
     text: string;
     attachment?: Attachment;
 }
-
-const HIT_SLOP_8 = { top: 8, bottom: 8, left: 8, right: 8 };
-const HIT_SLOP_10 = { top: 10, bottom: 10, left: 10, right: 10 };
-const HIT_SLOP_12 = { top: 12, bottom: 12, left: 12, right: 12 };
 
 // --- Memoized Custom Vector Icons ---
 const MenuIcon = memo(({ color }: { color: string }) => (
@@ -153,36 +151,12 @@ const PlusIcon = memo(({ color }: { color: string }) => (
     </View>
 ));
 
-const MicIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.micIconContainer}>
-        <View style={[styles.micCapsule, { backgroundColor: color }]} />
-        <View style={[styles.micCradle, { borderColor: color }]} />
-        <View style={[styles.micStem, { backgroundColor: color }]} />
-        <View style={[styles.micBase, { backgroundColor: color }]} />
-    </View>
-));
-
 const StopIcon = memo(({ color }: { color: string }) => (
     <View style={styles.stopIconContainer}>
         <View style={[styles.stopSquare, { backgroundColor: color }]} />
     </View>
 ));
 
-const SendIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.sendIconContainer}>
-        <View style={[styles.sendStem, { backgroundColor: color }]} />
-        <View style={[styles.sendArrowLeft, { backgroundColor: color }]} />
-        <View style={[styles.sendArrowRight, { backgroundColor: color }]} />
-    </View>
-));
-
-const HeadphoneIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.headphoneIconContainer}>
-        <View style={[styles.headphoneArch, { borderColor: color }]} />
-        <View style={[styles.headphoneEarLeft, { backgroundColor: color }]} />
-        <View style={[styles.headphoneEarRight, { backgroundColor: color }]} />
-    </View>
-));
 
 const UploadIcon = memo(({ color }: { color: string }) => (
     <View style={styles.uploadIconContainer}>
@@ -236,6 +210,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [isPlusMenuVisible, setIsPlusMenuVisible] = useState(false);
     const [showStopButton, setShowStopButton] = useState(false);
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+    const [isMultiline, setIsMultiline] = useState(false);
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
@@ -288,6 +263,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // Preserved animation definition
     const widthAnim = useRef(new Animated.Value(COLLAPSED_WIDTH)).current;
     const inputHeightAnim = useRef(new Animated.Value(INPUT_HEIGHT_NORMAL)).current;
+    const borderRadiusAnim = useRef(new Animated.Value(70)).current;
 
     const scrollViewRef = useRef<ScrollView>(null);
     const isAutoScrollEnabled = useRef(true);
@@ -345,7 +321,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // model a fresh context window (drops the KV cache on the same engine).
     const handleNewChat = useCallback(async () => {
         if (isGenerating) {
-            await stopGeneration().catch(() => {});
+            await stopGeneration().catch(() => { });
         }
         setMessages([]);
         setInputText('');
@@ -364,6 +340,14 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             useNativeDriver: false,
         }).start();
     }, [inputHeightAnim]);
+
+    useEffect(() => {
+        Animated.timing(borderRadiusAnim, {
+            toValue: (isMultiline || pendingAttachment) ? 12 : 50,
+            duration: 250,
+            useNativeDriver: false,
+        }).start();
+    }, [isMultiline, pendingAttachment, borderRadiusAnim]);
 
     const handleOpenPlusMenu = useCallback(() => {
         ReactNativeHapticFeedback.trigger('impactLight', {
@@ -650,7 +634,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     <View style={headerStyle}>
                         <View style={styles.headerLeft}>
                             <Pressable
-                                hitSlop={HIT_SLOP_12}
                                 style={styles.headerButton}
                                 onPress={() => {
                                     console.log('Hamburger Menu Pressed!');
@@ -666,7 +649,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
                         {/* LLM Model Selector Button */}
                         <Pressable
-                            hitSlop={HIT_SLOP_12}
                             onPress={openModelSelector}
                             style={[
                                 styles.modelSelectorButton,
@@ -852,7 +834,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                             styles.inputContainer,
                             {
                                 width: widthAnim,
-                                height: inputHeightAnim,
+                                minHeight: inputHeightAnim,
+                                borderRadius: borderRadiusAnim,
                                 backgroundColor: colors.card,
                                 borderColor: colors.border,
                                 bottom: insets.bottom,
@@ -878,8 +861,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 )}
                                 <Pressable
                                     onPress={handleRemoveAttachment}
-                                    style={[styles.previewCloseBtn, { backgroundColor: colors.background }]}
-                                    hitSlop={HIT_SLOP_8}>
+                                    style={[styles.previewCloseBtn, { backgroundColor: colors.background }]}>
                                     <CloseIcon color={colors.text} size={12} />
                                 </Pressable>
                             </View>
@@ -888,58 +870,54 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         {/* Input Row */}
                         <View style={styles.inputRow}>
                             {/* Plus button inside pill */}
-                            <Pressable
-                                hitSlop={HIT_SLOP_10}
-                                onPress={handleOpenPlusMenu}
-                                style={styles.iconButton}>
-                                <PlusIcon color={secondaryTextColor} />
-                            </Pressable>
+                            <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17, justifyContent: 'center', alignItems: 'center' }}>
+                                <Pressable
+                                    onPress={handleOpenPlusMenu}
+                                    style={styles.iconButton}>
+                                    <PlusIcon color={secondaryTextColor} />
+                                </Pressable>
+                            </View>
 
                             {/* TextInput */}
                             <TextInput
-                                style={[styles.input, { color: colors.text }]}
+                                style={[styles.input, { color: colors.text, maxHeight: 120 }]}
                                 placeholder="Message AI..."
                                 placeholderTextColor={secondaryTextColor}
                                 value={inputText}
                                 onChangeText={setInputText}
-                                onSubmitEditing={handleSend}
-                                returnKeyType="send"
+                                onContentSizeChange={(e) => setIsMultiline(e.nativeEvent.contentSize.height > 45)}
+                                multiline={true}
+                                returnKeyType="default"
                                 onFocus={expand}
                                 onBlur={collapse}
                             />
 
                             {/* Action Icon: Send / Stop / Mic */}
-                            {isGenerating ? (
-                                <Pressable
-                                    hitSlop={HIT_SLOP_10}
-                                    onPress={stopGeneration}
-                                    style={styles.iconButton}>
-                                    <StopIcon color="#FF453A" />
-                                </Pressable>
-                            ) : (inputText.trim().length > 0 || pendingAttachment) ? (
-                                <Pressable
-                                    hitSlop={HIT_SLOP_10}
-                                    onPress={handleSend}
-                                    style={styles.iconButton}>
-                                    <SendIcon color="#10A37F" />
-                                </Pressable>
-                            ) : (
-                                <Pressable
-                                    hitSlop={HIT_SLOP_10}
-                                    style={styles.iconButton}>
-                                    <MicIcon color={secondaryTextColor} />
-                                </Pressable>
-                            )}
-
-                            {/* Headphone Audio Button */}
-                            <Pressable
-                                hitSlop={HIT_SLOP_8}
-                                style={[
-                                    styles.headphoneButton,
-                                    { backgroundColor: headphoneBgColor },
-                                ]}>
-                                <HeadphoneIcon color={headphoneIconColor} />
-                            </Pressable>
+                            <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17 }}>
+                                {isGenerating ? (
+                                    <Reanimated.View key="stop" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                        <Pressable
+                                            onPress={stopGeneration}
+                                            style={styles.iconButton}>
+                                            <StopIcon color="#FF453A" />
+                                        </Pressable>
+                                    </Reanimated.View>
+                                ) : (inputText.trim().length > 0 || pendingAttachment) ? (
+                                    <Reanimated.View key="send" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                        <Pressable
+                                            onPress={handleSend}
+                                            style={styles.iconButton}>
+                                            <SendIcon size={18} color={secondaryTextColor} />
+                                        </Pressable>
+                                    </Reanimated.View>
+                                ) : (
+                                    <Reanimated.View key="mic" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                        <Pressable style={styles.iconButton}>
+                                            <MicIcon color={secondaryTextColor} size={18} />
+                                        </Pressable>
+                                    </Reanimated.View>
+                                )}
+                            </View>
                         </View>
                     </Animated.View>
                 </View>
@@ -1001,7 +979,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     </Pressable>
 
                     {fullscreenImage && (
-                        <Zoom 
+                        <Zoom
                             minScale={1}
                             maxScale={5}
                             doubleTapConfig={{ defaultScale: 2, minZoomScale: 1, maxZoomScale: 5 }}
@@ -1196,47 +1174,35 @@ const styles = StyleSheet.create({
     },
     inputContainer: {
         flexDirection: 'column',
-        borderRadius: 20.25,
         borderWidth: 1,
-        paddingHorizontal: 4,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
         position: 'absolute',
         zIndex: 1000,
         overflow: 'hidden',
-        justifyContent: 'flex-end',
+        justifyContent: 'center',
     },
     inputRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        height: INPUT_HEIGHT_NORMAL,
-        paddingLeft: 8,
+        minHeight: INPUT_HEIGHT_NORMAL,
+        justifyContent: 'center'
     },
     input: {
         flex: 1,
-        height: '100%',
-        paddingVertical: 0,
-        paddingHorizontal: 8,
+        minHeight: INPUT_HEIGHT_NORMAL,
+        paddingVertical: 10,
+        paddingLeft: '3.5%',
+        paddingRight: 4,
         fontSize: 15,
         includeFontPadding: false,
 
     },
     iconButton: {
-        width: 26,
-        height: 26,
+        width: 22,
+        height: 22,
         justifyContent: 'center',
         alignItems: 'center',
-    },
-    headphoneButton: {
-        width: 32,
-        height: 32,
-        borderRadius: 16,
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginLeft: 2,
-        elevation: 3,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.2,
-        shadowRadius: 2,
     },
     // Menu Icon
     menuIconContainer: {
