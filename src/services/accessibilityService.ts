@@ -276,7 +276,7 @@ class AccessibilityServiceImpl {
    * Fires when the foreground app's window state changes.
    */
   onScreenChanged(
-    callback: (event: ScreenChangedEvent) => void,
+    callback: (event: ScreenChangedEvent | any) => void,
   ): {remove: () => void} | null {
     if (!this.eventEmitter) return null;
     return this.eventEmitter.addListener('onScreenChanged', callback);

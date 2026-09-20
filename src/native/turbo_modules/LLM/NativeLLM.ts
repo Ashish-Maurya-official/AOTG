@@ -35,6 +35,8 @@ export interface Spec extends TurboModule {
   startGeneration(prompt: string): Promise<boolean>;
   /** Multimodal generation with optional image — imagePath is an absolute file path on device */
   startGenerationWithImage(prompt: string, imagePath: string): Promise<boolean>;
+  /** Multimodal generation with audio — audioPath is an absolute file path on device */
+  startGenerationWithAudio(prompt: string, audioPath: string): Promise<boolean>;
   stopGeneration(): Promise<boolean>;
   /** True while the model is actively decoding a response */
   isGenerating(): Promise<boolean>;

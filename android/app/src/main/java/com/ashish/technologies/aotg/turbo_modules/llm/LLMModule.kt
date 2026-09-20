@@ -719,6 +719,29 @@ class LLMModule(
     }
 
     /**
+     * Multimodal generation — sends an audio file + text prompt to an audio-capable
+     * LiteRT-LM model (e.g. Gemma 4).
+     *
+     * The [audioPath] must be an absolute path to an audio file (WAV, MP3, etc.) on the device.
+     * Falls back to text-only generation if the audio file is missing.
+     */
+    override fun startGenerationWithAudio(prompt: String, audioPath: String, promise: Promise) {
+        startGenerationInternal({
+            val audioFile = File(audioPath)
+            if (audioFile.exists() && audioFile.length() > 0) {
+                Log.d(TAG, "Audio inference: using audio ${audioFile.absolutePath} (${audioFile.length()} bytes)")
+                Contents.of(
+                    Content.AudioFile(audioFile.absolutePath),
+                    Content.Text(prompt)
+                )
+            } else {
+                Log.w(TAG, "Audio fallback: audio not found at $audioPath — using text only")
+                Contents.of(Content.Text(prompt))
+            }
+        }, promise)
+    }
+
+    /**
      * Stops the active generation. Signals the native runtime via cancelProcess()
      * (so it really stops decoding, instead of only cancelling the Kotlin flow)
      * and immediately emits the terminal events with the partial text so any JS

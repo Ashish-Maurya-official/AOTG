@@ -1,7 +1,7 @@
 buildscript {
     ext {
         buildToolsVersion = "37.0.0"
-        minSdkVersion = 24
+        minSdkVersion = 26
         compileSdkVersion = 37
         targetSdkVersion = 36
         ndkVersion = "27.1.12297006"
@@ -10,6 +10,8 @@ buildscript {
     repositories {
         google()
         mavenCentral()
+        maven { url 'https://jcenter.bintray.com' }
+        maven { url 'https://jitpack.io' }
     }
     dependencies {
         classpath("com.android.tools.build:gradle")
@@ -19,3 +21,12 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jcenter.bintray.com' }
+        maven { url 'https://jitpack.io' }
+    }
+}

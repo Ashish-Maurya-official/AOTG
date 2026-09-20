@@ -347,6 +347,65 @@ class LLMServiceImpl {
   }
 
   /**
+   * Multimodal generation — passes an audio file + text prompt to an
+   * audio-capable LiteRT-LM model (e.g. Gemma 4).
+   *
+   * @param prompt     The text prompt describing what to decide/reason about
+   * @param audioPath  Absolute path to an audio file (WAV, MP3, etc.) on the device
+   * @param onStream   Optional callback for streaming tokens as they arrive
+   */
+  public generateWithAudio(
+    prompt: string,
+    audioPath: string,
+    onStream?: (chunk: string) => void
+  ): Promise<string> {
+    return new Promise(async (resolve, reject) => {
+      const subscriptions: {remove: () => void}[] = [];
+      let settled = false;
+
+      const cleanup = () => {
+        subscriptions.forEach(s => s.remove());
+        subscriptions.length = 0;
+      };
+
+      if (this.eventEmitter) {
+        subscriptions.push(
+          this.eventEmitter.addListener('onToken', (data: any) => {
+            if (settled) return;
+            if (onStream) onStream(data.token);
+          })
+        );
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(data.fullText);
+          })
+        );
+        subscriptions.push(
+          this.eventEmitter.addListener('onGenerationError', (data: any) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(new Error(data.error));
+          })
+        );
+      }
+
+      try {
+        await NativeLLM.startGenerationWithAudio(prompt, audioPath);
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
+      }
+    });
+  }
+
+  /**
    * Immediately stops active token generation
    */
   public async stopGeneration(): Promise<boolean> {

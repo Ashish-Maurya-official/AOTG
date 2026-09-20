@@ -20,6 +20,8 @@ export interface ModelInfo {
   badge?: string;
   /** Whether this model can accept image input (multimodal). Text-only models must NOT be sent screenshots. */
   supportsVision: boolean;
+  /** Whether this model can accept audio input. */
+  supportsAudio: boolean;
 }
 
 export interface ModelState {
@@ -42,6 +44,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true',
     fileName: 'gemma-4-e2b.litertlm',
     supportsVision: true,
+    supportsAudio: true,
     badge: 'Latest 2026',
   },
   {
@@ -53,6 +56,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     url: 'https://huggingface.co/litert-community/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'deepseek-r1-distill-qwen-1.5b.litertlm',
     supportsVision: false,
+    supportsAudio: false,
     badge: 'Reasoning',
   },
   {
@@ -64,6 +68,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     url: 'https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'qwen-2.5-1.5b-instruct.litertlm',
     supportsVision: false,
+    supportsAudio: false,
     badge: 'Fast',
   },
   {
@@ -75,6 +80,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm?download=true',
     fileName: 'gemma-4-e4b.litertlm',
     supportsVision: true,
+    supportsAudio: true,
   },
   {
     id: 'phi-4-mini-instruct',
@@ -85,6 +91,7 @@ export const AVAILABLE_MODELS: ModelInfo[] = [
     url: 'https://huggingface.co/litert-community/Phi-4-mini-instruct/resolve/main/Phi-4-mini-instruct_multi-prefill-seq_q8_ekv4096.litertlm?download=true',
     fileName: 'phi-4-mini-instruct.litertlm',
     supportsVision: false,
+    supportsAudio: false,
   },
 ];
 

@@ -8,6 +8,7 @@ import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.ashish.technologies.aotg.turbo_modules.llm.LLMPackage
 import com.ashish.technologies.aotg.turbo_modules.accessibility.AccessibilityPackage
+import com.ashish.technologies.aotg.turbo_modules.document.DocumentProcessorPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -20,6 +21,7 @@ class MainApplication : Application(), ReactApplication {
           // add(MyReactNativePackage())
           add(LLMPackage())
           add(AccessibilityPackage())
+          add(DocumentProcessorPackage())
         },
     )
   }

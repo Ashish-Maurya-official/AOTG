@@ -303,9 +303,11 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
 
     // Also poll periodically as a fallback
     const interval = setInterval(checkService, 1500);
+    const sub = AccessibilityService.onScreenChanged?.((event: any) => {});
     return () => {
       clearInterval(interval);
       appStateListener.remove();
+      sub?.remove?.();
     };
   }, [dispatch]);
 
@@ -337,7 +339,7 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
   useEffect(() => {
     if (steps.length > 0) {
       setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({animated: true});
+        (scrollViewRef.current as any)?.scrollToEnd({animated: true});
       }, 200);
     }
   }, [steps.length]);
@@ -493,7 +495,7 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
 
       {/* Steps Timeline */}
       <ScrollView
-        ref={scrollViewRef}
+        ref={scrollViewRef as any}
         style={styles.scrollView}
         contentContainerStyle={[
           styles.scrollContent,

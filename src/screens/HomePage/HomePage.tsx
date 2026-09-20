@@ -41,6 +41,7 @@ import {
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import useLLM from '../../hooks/useLLM';
 import LLMService, { estimateTokens } from '../../services/llmService';
+import documentService from '../../services/documentService';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
@@ -83,8 +84,22 @@ const ANIMATION_DURATION = 500;
 // --- Attachment Types & Constants ---
 const INPUT_HEIGHT_NORMAL = 40.5;
 const INPUT_HEIGHT_WITH_PREVIEW = 130;
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
 const SUPPORTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
+const SUPPORTED_DOC_TYPES = [
+    'application/pdf',
+    'text/plain',
+    'text/csv',
+    'text/markdown',
+    'text/html',
+    'application/json',
+    'message/rfc822',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+];
+const ALL_SUPPORTED_TYPES = [...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_DOC_TYPES];
+const SUPPORTED_AUDIO_TYPES = ['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/ogg', 'audio/aac', 'audio/flac', 'audio/x-wav', 'audio/mp4'];
 
 interface Attachment {
     uri: string;
@@ -213,6 +228,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [showStopButton, setShowStopButton] = useState(false);
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
     const [isMultiline, setIsMultiline] = useState(false);
+    const [isProcessingDocument, setIsProcessingDocument] = useState(false);
+    const [documentProgressMessage, setDocumentProgressMessage] = useState<string>('');
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
@@ -225,6 +242,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         streamedText,
         generate,
         generateWithVision,
+        generateWithAudio,
         stopGeneration,
         loadModel,
     } = useLLM();
@@ -280,7 +298,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     const handleContentSizeChange = useCallback(() => {
         if (isAutoScrollEnabled.current) {
-            scrollViewRef.current?.scrollToEnd({ animated: true });
+            (scrollViewRef.current as any)?.scrollToEnd({ animated: true });
         }
     }, []);
 
@@ -383,7 +401,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         setIsPlusMenuVisible(false);
     }, []);
 
-    const handlePickFile = useCallback(async () => {
+    const handlePickImage = useCallback(async () => {
         setIsPlusMenuVisible(false);
         try {
             const result = await pick({
@@ -445,7 +463,71 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 // User cancelled — no state change
                 return;
             }
-            console.error('[HomePage] File pick error:', err);
+            console.error('[HomePage] Image pick error:', err);
+            Alert.alert('Error', 'Could not pick image. Please try again.', [{ text: 'OK' }]);
+        }
+    }, [animateInputHeight]);
+
+    const handlePickDocument = useCallback(async () => {
+        setIsPlusMenuVisible(false);
+        try {
+            const result = await pick({
+                mode: 'import',
+                type: [
+                    DocumentPickerTypes.pdf,
+                    DocumentPickerTypes.plainText,
+                    DocumentPickerTypes.csv,
+                    DocumentPickerTypes.doc,
+                    DocumentPickerTypes.docx,
+                    DocumentPickerTypes.xls,
+                    DocumentPickerTypes.xlsx,
+                    DocumentPickerTypes.audio,
+                ],
+            });
+
+            const file = result[0];
+            if (!file) return;
+
+            const fileType = file.type || '';
+            const fileSize = file.size || 0;
+
+            // Validate file size
+            if (fileSize > MAX_FILE_SIZE_BYTES) {
+                Alert.alert(
+                    'File Too Large',
+                    `"${file.name}" is ${(fileSize / (1024 * 1024)).toFixed(1)} MB. Maximum allowed is 10 MB.`,
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
+            // Cache a local copy of the file for native modules
+            let fileUri = file.uri;
+            try {
+                const copyResult = await keepLocalCopy({
+                    files: [{ uri: file.uri, fileName: file.name || 'file' }],
+                    destination: 'cachesDirectory',
+                });
+                if (copyResult[0].status === 'success') {
+                    fileUri = copyResult[0].localUri;
+                }
+            } catch (copyErr) {
+                console.warn('[HomePage] Failed to create local copy:', copyErr);
+            }
+
+            setPendingAttachment({
+                uri: fileUri,
+                name: file.name || 'file',
+                type: fileType,
+                size: fileSize,
+            });
+            animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
+        } catch (err: any) {
+            if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
+                // User cancelled — no state change
+                return;
+            }
+            console.error('[HomePage] Document pick error:', err);
             Alert.alert('Error', 'Could not pick file. Please try again.', [{ text: 'OK' }]);
         }
     }, [animateInputHeight]);
@@ -481,9 +563,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
         setMessages((prev) => [...prev, userMessage]);
 
-        // Check if attachment is an image and model supports vision
+        // Check attachment type
         const isImageAttachment = attachment && SUPPORTED_IMAGE_TYPES.includes(attachment.type.toLowerCase());
+        const isAudioAttachment = attachment && SUPPORTED_AUDIO_TYPES.includes(attachment.type.toLowerCase());
         const modelSupportsVision = !!selectedModel.supportsVision;
+        const modelSupportsAudio = !!selectedModel.supportsAudio;
 
         if (isImageAttachment && !modelSupportsVision) {
             setMessages((prev) => [
@@ -492,6 +576,18 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     id: assistantMsgId,
                     role: 'assistant',
                     text: `"${selectedModel.name}" doesn't support image input. Please select a vision-capable model to process images, or send a text-only message.`,
+                },
+            ]);
+            return;
+        }
+
+        if (isAudioAttachment && !modelSupportsAudio) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" doesn't support audio input. Please select an audio-capable model (e.g. Gemma 4) to process audio files, or send a text-only message.`,
                 },
             ]);
             return;
@@ -578,6 +674,49 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 // Vision path: send image + text together
                 const imagePath = attachment.uri.replace('file://', '');
                 response = await generateWithVision(query || 'Describe this image.', imagePath);
+            } else if (isAudioAttachment && modelSupportsAudio && attachment) {
+                // Audio path: send audio + text together
+                const audioPath = attachment.uri.replace('file://', '');
+                response = await generateWithAudio(query || 'Describe this audio.', audioPath);
+            } else if (attachment && !isImageAttachment && !isAudioAttachment) {
+                // Document processing path
+                setIsProcessingDocument(true);
+                setDocumentProgressMessage('Processing document...');
+                
+                const unsubscribe = documentService.onProgress((event) => {
+                    setDocumentProgressMessage(event.message);
+                });
+                
+                try {
+                    const filePath = attachment.uri.replace('file://', '');
+                    const docResult = await documentService.processDocument(filePath);
+                    unsubscribe();
+                    
+                    if (docResult.warnings && docResult.warnings.length > 0) {
+                        setMessages((prev) => [
+                            ...prev,
+                            { id: `${assistantMsgId}-warn`, role: 'assistant', text: `_Note: ${docResult.warnings.join(', ')}_` }
+                        ]);
+                    }
+                    
+                    const maxTokens = 2000; // Leave room for response
+                    const relevantContext = documentService.getRelevantContext(query, docResult.text, maxTokens);
+                    
+                    let finalPrompt = query;
+                    if (relevantContext) {
+                        finalPrompt = `[Document Context from ${attachment.name}]\n${relevantContext}\n\nUser Question: ${query || 'Summarize the document.'}`;
+                    } else {
+                        finalPrompt = query || `[Attached file: ${attachment.name} - could not extract text]`;
+                    }
+                    
+                    response = await generate(finalPrompt);
+                } catch (docErr: any) {
+                    unsubscribe();
+                    throw new Error(`Failed to process document: ${docErr.message}`);
+                } finally {
+                    setIsProcessingDocument(false);
+                    setDocumentProgressMessage('');
+                }
             } else {
                 // Text-only path (existing flow)
                 response = await generate(query);
@@ -610,8 +749,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         selectedModel.id,
         selectedModel.name,
         selectedModel.supportsVision,
+        selectedModel.supportsAudio,
         generate,
         generateWithVision,
+        generateWithAudio,
         streamedText,
         dispatch,
         preferredBackend,
@@ -737,7 +878,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 pointerEvents="none"
                             />
                             <ScrollView
-                                ref={scrollViewRef}
+                                ref={scrollViewRef as any}
                                 onScroll={handleScroll}
                                 scrollEventThrottle={16}
                                 onContentSizeChange={handleContentSizeChange}
@@ -916,9 +1057,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 onBlur={collapse}
                             />
 
-                            {/* Action Icon: Send / Stop / Mic */}
+                            {/* Action Icon: Send / Stop / Mic / Progress */}
                             <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17 }}>
-                                {isGenerating ? (
+                                {isProcessingDocument ? (
+                                    <Reanimated.View key="process" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                        <ActivityIndicator size="small" color="#2DD4BF" />
+                                    </Reanimated.View>
+                                ) : isGenerating ? (
                                     <Reanimated.View key="stop" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
                                         <Pressable
                                             onPress={stopGeneration}
@@ -969,7 +1114,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 ]}>
                                 <Pressable
                                     style={styles.plusMenuItem}
-                                    onPress={handlePickFile}>
+                                    onPress={handlePickImage}>
                                     <ImageIcon size={24} color="#FFFFFF" />
                                     <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                         Upload Image
@@ -980,7 +1125,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 
                                 <Pressable
                                     style={styles.plusMenuItem}
-                                    onPress={handlePickFile}>
+                                    onPress={handlePickDocument}>
                                     <DocumentIcon size={24} color="#FFFFFF" />
                                     <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                         Upload Files
