@@ -1,4 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { RootState } from '../store/store';
+import { setIsGenerating as setReduxIsGenerating } from '../store/slices/llmSlice';
 import LLMService, { BackendType, TokenEvent } from '../services/llmService';
 import { InitializeResult } from '../native/turbo_modules/LLM/NativeLLM';
 
@@ -17,8 +20,14 @@ export interface UseLLMReturn {
 }
 
 export const useLLM = (): UseLLMReturn => {
+  const dispatch = useDispatch();
+  const isGenerating = useSelector((state: RootState) => state.llm.isGenerating);
+  
+  const setIsGenerating = useCallback((val: boolean) => {
+    dispatch(setReduxIsGenerating(val));
+  }, [dispatch]);
+
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [streamedText, setStreamedText] = useState('');
   const [error, setError] = useState<string | null>(null);

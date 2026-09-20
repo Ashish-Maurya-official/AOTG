@@ -13,6 +13,6 @@ export default {
     robotBg: '#E2E4E9',
     robotIcon: '#10A37F',
     headphoneBg: '#111827',
-    headphoneIcon: '#FFFFFF',
+    headphoneIcon: '#FFF',
   },
 };

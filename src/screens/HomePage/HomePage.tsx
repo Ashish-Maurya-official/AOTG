@@ -30,6 +30,7 @@ import { useTheme } from '../../theme/ThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootState } from '../../store/store';
 import MicIcon from '../../static/images/SVG/MicIcon';
+import LiveIcon from '../../static/images/SVG/LiveIcon';
 import {
     AVAILABLE_MODELS,
     setSelectedModel,
@@ -52,6 +53,7 @@ import Reanimated, { ZoomIn, ZoomOut, FadeIn, FadeOut } from 'react-native-reani
 import SendIcon from '../../static/images/SVG/SendIcon';
 import ImageIcon from '../../static/images/SVG/ImageIcon';
 import DocumentIcon from '../../static/images/SVG/DocumentIcon';
+import KeyEvent from 'react-native-keyevent';
 const { width, height: windowHeight } = Dimensions.get('window');
 
 const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) => {
@@ -235,6 +237,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
     // user would see a confusing "load error" message without this).
     const isAutoLoadingRef = useRef(false);
+    const inputRef = useRef<TextInput>(null);
 
     // Native LLM Hook
     const {
@@ -253,6 +256,18 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             AVAILABLE_MODELS[0],
         [selectedModelId]
     );
+
+    // Global Hardware Key Listener for F1 / Search
+    useEffect(() => {
+        KeyEvent.onKeyDownListener((keyEvent: any) => {
+            if (keyEvent.keyCode === 112 || keyEvent.keyCode === 84) {
+                inputRef.current?.focus();
+            }
+        });
+        return () => {
+            KeyEvent.removeKeyDownListener();
+        };
+    }, []);
 
     // Sync on-disk model state on mount so already-downloaded models are
     // recognized after an app restart (the status dot + auto-load depend on it).
@@ -783,18 +798,14 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     const robotBgColor = colors.robotBg || '#262831';
     const robotIconColor = colors.robotIcon || '#2DD4BF';
-    const headphoneBgColor = colors.headphoneBg || '#FFFFFF';
+    const headphoneBgColor = colors.headphoneBg || '#FFF';
     const headphoneIconColor = colors.headphoneIcon || '#000000';
     const secondaryTextColor = colors.secondaryText || '#9E9EA8';
 
     const dotColor =
         currentStatus === 'loaded'
             ? '#10A37F'
-            : currentStatus === 'downloaded'
-                ? '#3B82F6'
-                : currentStatus === 'downloading'
-                    ? '#F59E0B'
-                    : secondaryTextColor;
+            : colors.text;
 
     const hasMessages = messages.length > 0 || isGenerating;
 
@@ -831,9 +842,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                     borderColor: colors.border,
                                 },
                             ]}>
-                            <View
-                                style={[styles.modelDot, { backgroundColor: dotColor }]}
-                            />
+                            <View style={{ marginRight: 4 }}>
+                                <LiveIcon color={dotColor} size={14} isAnimated={isGenerating} />
+                            </View>
                             <Text
                                 numberOfLines={1}
                                 style={[
@@ -911,11 +922,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         ]}>
                                         {msg.role === 'assistant' && (
                                             <View style={styles.assistantHeader}>
-                                                <View style={styles.activeDot} />
+                                                <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
                                                 <Text
                                                     style={[
                                                         styles.assistantModelTag,
-                                                        { color: '#10A37F' },
+                                                        { color: colors.text },
                                                     ]}>
                                                     {selectedModel.name} (On-Device)
                                                 </Text>
@@ -973,18 +984,18 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         <View style={styles.assistantHeader}>
                                             <ActivityIndicator
                                                 size="small"
-                                                color="#10A37F"
+                                                color={colors.text}
                                             />
                                             <Text
                                                 style={[
                                                     styles.assistantModelTag,
-                                                    { color: '#10A37F' },
+                                                    { color: colors.text },
                                                 ]}>
                                                 Generating with {selectedModel.name}...
                                             </Text>
                                         </View>
                                         <MessageRenderer content={streamedText || 'Thinking...'} />
-                                        <Text style={{ color: '#10A37F', fontSize: 15, marginTop: 4 }}> ▋</Text>
+                                        <Text style={{ color: colors.text, fontSize: 15, marginTop: 4 }}> ▋</Text>
                                     </View>
                                 )}
                             </ScrollView>
@@ -1045,6 +1056,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         <View style={[styles.inputRow, isMultiline && { flexDirection: 'column', alignItems: 'stretch' }]}>
                             {/* TextInput */}
                             <TextInput
+                                ref={inputRef}
                                 style={[
                                     styles.input,
                                     { color: colors.text, maxHeight: 120 },
@@ -1059,6 +1071,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 returnKeyType="default"
                                 onFocus={expand}
                                 onBlur={collapse}
+                                onSubmitEditing={handleSend}
                             />
 
                             {/* Actions Container */}
@@ -1139,7 +1152,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 <Pressable
                                     style={styles.plusMenuItem}
                                     onPress={handlePickImage}>
-                                    <ImageIcon size={24} color="#FFFFFF" />
+                                    <ImageIcon size={24} color="#FFF" />
                                     <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                         Upload Image
                                     </Text>
@@ -1150,7 +1163,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 <Pressable
                                     style={styles.plusMenuItem}
                                     onPress={handlePickDocument}>
-                                    <DocumentIcon size={24} color="#FFFFFF" />
+                                    <DocumentIcon size={24} color="#FFF" />
                                     <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                         Upload Files
                                     </Text>
@@ -1185,7 +1198,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         onPress={() => setFullscreenImage(null)}
                     >
                         <View style={{ transform: [{ rotate: '45deg' }] }}>
-                            <PlusIcon color="#FFFFFF" />
+                            <PlusIcon color="#FFF" />
                         </View>
                     </Pressable>
 
@@ -1258,7 +1271,6 @@ const styles = StyleSheet.create({
         width: 7,
         height: 7,
         borderRadius: 3.5,
-        backgroundColor: '#10A37F',
     },
     modelSelectorText: {
         fontSize: 13,
@@ -1367,7 +1379,6 @@ const styles = StyleSheet.create({
         width: 6,
         height: 6,
         borderRadius: 3,
-        backgroundColor: '#10A37F',
     },
     messageText: {
         fontSize: 15,

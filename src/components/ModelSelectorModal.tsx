@@ -16,6 +16,15 @@ import {
 import { useSelector, useDispatch } from 'react-redux';
 import { useTheme } from '../theme/ThemeProvider';
 import { RootState } from '../store/store';
+import DownloadIcon from '../static/images/SVG/DownloadIcon';
+import DeleteIcon from '../static/images/SVG/DeleteIcon';
+import PlayIcon from '../static/images/SVG/PlayIcon';
+import ReloadIcon from '../static/images/SVG/ReloadIcon';
+import LiveIcon from '../static/images/SVG/LiveIcon';
+import CpuIcon from '../static/images/SVG/CpuIcon';
+import LoaderIcon from '../static/images/SVG/LoaderIcon';
+import DriveIcon from '../static/images/SVG/DriveIcon';
+import useLLM from '../hooks/useLLM';
 
 import {
     AVAILABLE_MODELS,
@@ -64,53 +73,10 @@ const backendChainLabel = (backend: string): string => {
     }
 };
 
-// Checkmark Vector Icon
-const CheckIcon = ({ color }: { color: string }) => (
-    <View style={styles.checkIconContainer}>
-        <View style={[styles.checkStemShort, { backgroundColor: color }]} />
-        <View style={[styles.checkStemLong, { backgroundColor: color }]} />
-    </View>
-);
 
-// Download Arrow Vector Icon
-const DownloadIcon = ({ color }: { color: string }) => (
-    <View style={styles.downloadIconContainer}>
-        <View style={[styles.downloadStem, { backgroundColor: color }]} />
-        <View style={[styles.downloadArrowLeft, { backgroundColor: color }]} />
-        <View style={[styles.downloadArrowRight, { backgroundColor: color }]} />
-        <View style={[styles.downloadBase, { backgroundColor: color }]} />
-    </View>
-);
 
-// Bolt / Flash Vector Icon
-const BoltIcon = ({ color }: { color: string }) => (
-    <View style={styles.boltIconContainer}>
-        <View style={[styles.boltTop, { backgroundColor: color }]} />
-        <View style={[styles.boltBottom, { backgroundColor: color }]} />
-    </View>
-);
 
-// Trash / Delete Vector Icon
-const TrashIcon = ({ color }: { color: string }) => (
-    <View style={styles.trashContainer}>
-        <View style={[styles.trashHandle, { backgroundColor: color }]} />
-        <View style={[styles.trashLid, { backgroundColor: color }]} />
-        <View style={[styles.trashBody, { borderColor: color }]}>
-            <View style={[styles.trashLine, { backgroundColor: color }]} />
-            <View style={[styles.trashLine, { backgroundColor: color }]} />
-        </View>
-    </View>
-);
 
-// Sparkle / Chip Icon
-const SparkleIcon = ({ color }: { color: string }) => (
-    <View style={styles.sparkleContainer}>
-        <View style={[styles.sparkleH, { backgroundColor: color }]} />
-        <View style={[styles.sparkleV, { backgroundColor: color }]} />
-        <View style={[styles.sparkleDiag1, { backgroundColor: color }]} />
-        <View style={[styles.sparkleDiag2, { backgroundColor: color }]} />
-    </View>
-);
 
 const formatBytes = (bytes: number): string => {
     if (bytes <= 0) return '0 B';
@@ -153,11 +119,40 @@ const ModelItem = memo(
     }) => {
         const { status, progress, speedMBs, bytesDownloaded, totalBytes, error } =
             modelState;
+        
+        const { isGenerating } = useLLM();
 
         const isLoaded = status === 'loaded';
         const isDownloaded = status === 'downloaded';
         const isDownloading = status === 'downloading';
         const isLoading = status === 'loading';
+
+        const [showError, setShowError] = React.useState(false);
+        const errorOpacity = React.useRef(new Animated.Value(0)).current;
+
+        React.useEffect(() => {
+            if (error) {
+                setShowError(true);
+                Animated.timing(errorOpacity, {
+                    toValue: 1,
+                    duration: 300,
+                    useNativeDriver: true,
+                }).start();
+
+                const timer = setTimeout(() => {
+                    Animated.timing(errorOpacity, {
+                        toValue: 0,
+                        duration: 300,
+                        useNativeDriver: true,
+                    }).start(() => setShowError(false));
+                }, 3000);
+
+                return () => clearTimeout(timer);
+            } else {
+                setShowError(false);
+                errorOpacity.setValue(0);
+            }
+        }, [error, status, errorOpacity]);
 
         return (
             <View
@@ -165,12 +160,12 @@ const ModelItem = memo(
                     styles.modelCard,
                     {
                         backgroundColor: isLoaded
-                            ? 'rgba(16, 163, 127, 0.12)'
+                            ? 'rgba(255, 255, 255, 0.08)'
                             : isSelected
                                 ? 'rgba(255, 255, 255, 0.04)'
                                 : colors.background,
                         borderColor: isLoaded
-                            ? '#10A37F'
+                            ? 'rgba(255, 255, 255, 0.6)'
                             : isSelected
                                 ? 'rgba(255, 255, 255, 0.2)'
                                 : colors.border,
@@ -200,7 +195,7 @@ const ModelItem = memo(
                         </View>
                         {model.badge && (
                             <View style={styles.recommendedBadge}>
-                                <Text style={styles.recommendedBadgeText}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
                                     {model.badge}
                                 </Text>
                             </View>
@@ -208,16 +203,12 @@ const ModelItem = memo(
                     </View>
 
                     <View style={styles.rightHeaderAction}>
-                        <Text
-                            style={[
-                                styles.sizeText,
-                                { color: colors.secondaryText },
-                            ]}>
-                            {model.size}
-                        </Text>
-                        {isLoaded && (
-                            <View style={styles.checkCircle}>
-                                <CheckIcon color="#FFFFFF" />
+                        {isLoaded && activeBackend && (
+                            <View style={[styles.activeBackendChip, { flexDirection: 'row', alignItems: 'center', gap: 4 }]}>
+                                <LiveIcon color="#FFFFFF" size={14} isAnimated={isGenerating} />
+                                <Text style={styles.activeBackendChipText}>
+                                    {activeBackend}
+                                </Text>
                             </View>
                         )}
                     </View>
@@ -242,20 +233,25 @@ const ModelItem = memo(
                         ]}>
                         📦 {model.fileName}
                     </Text>
-                    {isLoaded && activeBackend && (
-                        <View style={styles.activeBackendChip}>
-                            <Text style={styles.activeBackendChipText}>
-                                ⚡ {activeBackend}
-                            </Text>
-                        </View>
-                    )}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <DriveIcon color={colors.secondaryText} size={14} />
+                        <Text
+                            style={[
+                                styles.sizeText,
+                                { color: colors.secondaryText },
+                            ]}>
+                            {model.size}
+                        </Text>
+                    </View>
                 </View>
 
                 {/* Error Banner if download/load failed */}
-                {error && (
-                    <Text style={styles.errorText}>
-                        ⚠ Error: {error}
-                    </Text>
+                {showError && error && (
+                    <Animated.Text style={[styles.errorText, { opacity: errorOpacity }]}>
+                        {error.toLowerCase().includes('cancelled') 
+                            ? 'Download cancelled.' 
+                            : error.replace(/^Error:\s*/i, '')}
+                    </Animated.Text>
                 )}
 
                 {/* Action Controls Section */}
@@ -271,7 +267,7 @@ const ModelItem = memo(
                                     borderColor: colors.border,
                                 },
                             ]}>
-                            <DownloadIcon color={colors.text} />
+                            <DownloadIcon color={colors.text} size={18} />
                             <Text
                                 style={[
                                     styles.buttonText,
@@ -290,7 +286,7 @@ const ModelItem = memo(
                                     <Text
                                         style={[
                                             styles.progressText,
-                                            { color: '#10A37F' },
+                                            { color: colors.text },
                                         ]}>
                                         Downloading... {Math.round(progress)}%
                                     </Text>
@@ -326,7 +322,7 @@ const ModelItem = memo(
                                 <View
                                     style={[
                                         styles.progressBarFill,
-                                        { width: `${Math.min(progress, 100)}%` },
+                                        { width: `${Math.min(progress, 100)}%`, backgroundColor: colors.text },
                                     ]}
                                 />
                             </View>
@@ -341,13 +337,13 @@ const ModelItem = memo(
                                     onPress={onDelete}
                                     hitSlop={8}
                                     style={styles.deleteIconButton}>
-                                    <TrashIcon color="#FF453A" />
+                                    <DeleteIcon color="#FF453A" size={20} />
                                 </Pressable>
                                 <Pressable
                                     onPress={onLoad}
                                     style={styles.loadButton}>
-                                    <BoltIcon color="#FFFFFF" />
-                                    <Text style={styles.loadButtonText}>
+                                    <PlayIcon color={colors.text} size={20} />
+                                    <Text style={[styles.loadButtonText, { color: colors.text }]}>
                                         Load Model
                                     </Text>
                                 </Pressable>
@@ -362,11 +358,11 @@ const ModelItem = memo(
                                 styles.loadingButton,
                                 { backgroundColor: colors.card },
                             ]}>
-                            <ActivityIndicator size="small" color="#10A37F" />
+                            <LoaderIcon color={colors.text} size={20} />
                             <Text
                                 style={[
                                     styles.buttonText,
-                                    { color: '#10A37F' },
+                                    { color: colors.text },
                                 ]}>
                                 Trying {backendChainLabel(preferredBackend)}...
                             </Text>
@@ -387,7 +383,7 @@ const ModelItem = memo(
                                         disabled={isUnloading}
                                         hitSlop={8}
                                         style={[styles.deleteIconButton, isUnloading && styles.disabledButton]}>
-                                        <TrashIcon color="#FF453A" />
+                                        <DeleteIcon color="#FF453A" size={20} />
                                     </Pressable>
                                     <Pressable
                                         onPress={onUnload}
@@ -398,7 +394,7 @@ const ModelItem = memo(
                                         ]}>
                                         {isUnloading ? (
                                             <View style={styles.unloadingRow}>
-                                                <ActivityIndicator size="small" color={colors.text} />
+                                                <LoaderIcon color={colors.text} size={20} />
                                                 <Text style={[styles.unloadButtonText, { color: colors.text }]}>
                                                     Unloading…
                                                 </Text>
@@ -413,8 +409,8 @@ const ModelItem = memo(
                                         <Pressable
                                             onPress={onLoad}
                                             style={styles.loadButton}>
-                                            <BoltIcon color="#FFFFFF" />
-                                            <Text style={styles.loadButtonText}>
+                                            <ReloadIcon color={colors.text} size={20} />
+                                            <Text style={[styles.loadButtonText, { color: colors.text }]}>
                                                 Reload on {preferredBackend}
                                             </Text>
                                         </Pressable>
@@ -821,7 +817,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         {/* Header */}
                         <View style={styles.sheetHeader}>
                             <View style={styles.titleWithIcon}>
-                                <SparkleIcon color="#10A37F" />
+                                <CpuIcon color={colors.text} size={24} />
                                 <Text
                                     style={[styles.sheetTitle, { color: colors.text }]}>
                                     LiteRT-LM Models
@@ -867,11 +863,11 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                             styles.backendTab,
                                             {
                                                 backgroundColor: isChosen
-                                                    ? '#10A37F'
-                                                    : colors.background,
+                                                    ? colors.text
+                                                    : 'rgba(128, 128, 128, 0.15)',
                                                 borderColor: isChosen
-                                                    ? '#10A37F'
-                                                    : colors.border,
+                                                    ? colors.text
+                                                    : 'rgba(128, 128, 128, 0.25)',
                                             },
                                         ]}>
                                         <Text
@@ -879,7 +875,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                                 styles.backendTabText,
                                                 {
                                                     color: isChosen
-                                                        ? '#FFFFFF'
+                                                        ? colors.background
                                                         : colors.text,
                                                 },
                                             ]}>
@@ -1032,7 +1028,7 @@ const styles = StyleSheet.create({
     modelHeader: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         marginBottom: 6,
     },
     modelTitleRow: {
@@ -1057,13 +1053,14 @@ const styles = StyleSheet.create({
         fontWeight: '600',
     },
     recommendedBadge: {
-        backgroundColor: '#10A37F',
+        backgroundColor: 'rgba(128, 128, 128, 0.15)',
         paddingHorizontal: 8,
         paddingVertical: 2,
         borderRadius: 8,
+        borderWidth: 1,
+        borderColor: 'rgba(128, 128, 128, 0.25)',
     },
     recommendedBadgeText: {
-        color: '#FFFFFF',
         fontSize: 11,
         fontWeight: '700',
     },
@@ -1103,13 +1100,15 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     activeBackendChip: {
-        backgroundColor: 'rgba(16, 163, 127, 0.2)',
+        backgroundColor: '#10A37F',
         paddingHorizontal: 8,
         paddingVertical: 2,
         borderRadius: 6,
+        borderWidth: 1,
+        borderColor: '#10A37F',
     },
     activeBackendChipText: {
-        color: '#10A37F',
+        color: '#FFF',
         fontSize: 11,
         fontWeight: '700',
     },
@@ -1170,7 +1169,6 @@ const styles = StyleSheet.create({
     },
     progressBarFill: {
         height: '100%',
-        backgroundColor: '#10A37F',
         borderRadius: 3,
     },
     downloadedActionsRow: {
@@ -1200,7 +1198,6 @@ const styles = StyleSheet.create({
         gap: 6,
     },
     downloadedBadgeText: {
-        color: '#10A37F',
         fontSize: 13,
         fontWeight: '600',
     },
@@ -1208,13 +1205,14 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 6,
-        backgroundColor: '#10A37F',
         paddingHorizontal: 16,
         paddingVertical: 8,
         borderRadius: 10,
+        backgroundColor: 'rgba(128, 128, 128, 0.15)',
+        borderWidth: 1,
+        borderColor: 'rgba(128, 128, 128, 0.25)',
     },
     loadButtonText: {
-        color: '#FFFFFF',
         fontSize: 13,
         fontWeight: '700',
     },
@@ -1258,10 +1256,8 @@ const styles = StyleSheet.create({
         width: 8,
         height: 8,
         borderRadius: 4,
-        backgroundColor: '#10A37F',
     },
     activeLoadedText: {
-        color: '#10A37F',
         fontSize: 13,
         fontWeight: '700',
     },
@@ -1272,7 +1268,6 @@ const styles = StyleSheet.create({
         borderWidth: 1,
     },
     selectedModelButtonText: {
-        color: '#10A37F',
         fontSize: 13,
         fontWeight: '600',
     },

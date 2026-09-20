@@ -101,6 +101,7 @@ interface LLMState {
   preferredBackend: BackendType;
   activeBackend: string | null;
   modelStatuses: Record<string, ModelState>;
+  isGenerating: boolean;
 }
 
 const initialModelStatuses: Record<string, ModelState> = AVAILABLE_MODELS.reduce(
@@ -124,6 +125,7 @@ const initialState: LLMState = {
   preferredBackend: 'AUTO',
   activeBackend: null,
   modelStatuses: initialModelStatuses,
+  isGenerating: false,
 };
 
 const llmSlice = createSlice({
@@ -281,6 +283,9 @@ const llmSlice = createSlice({
       state.loadedModelId = null;
       state.activeBackend = null;
     },
+    setIsGenerating: (state, action: PayloadAction<boolean>) => {
+      state.isGenerating = action.payload;
+    },
   },
 });
 
@@ -298,6 +303,7 @@ export const {
   setLoadedModel,
   deleteModel,
   unloadModel,
+  setIsGenerating,
 } = llmSlice.actions;
 
 export default llmSlice.reducer;
