@@ -802,6 +802,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const headphoneIconColor = colors.headphoneIcon || '#000000';
     const secondaryTextColor = colors.secondaryText || '#9E9EA8';
 
+    const isDark = theme.mode === 'dark';
+    const glassBgColor = isDark ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.6)';
+    const popupBgColor = isDark ? 'rgba(34,36,43,0.85)' : 'rgba(255,255,255,0.85)';
+    const inactiveIconColor = isDark ? secondaryTextColor : colors.text;
+
     const dotColor =
         currentStatus === 'loaded'
             ? '#10A37F'
@@ -1083,18 +1088,18 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 pointerEvents="box-none"
                             >
                                 {/* Plus button inside pill */}
-                                <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17, justifyContent: 'center', alignItems: 'center' }} pointerEvents="auto">
+                                <View style={{ width: 34, height: 34, backgroundColor: glassBgColor, borderRadius: 17, justifyContent: 'center', alignItems: 'center' }} pointerEvents="auto">
                                     <Pressable
                                         onPress={handleOpenPlusMenu}
                                         style={styles.iconButton}>
                                         <Animated.View style={plusRotationStyle}>
-                                            <PlusIcon color={plusRotationAnim.interpolate({ inputRange: [0, 1], outputRange: [secondaryTextColor, colors.text] })} />
+                                            <PlusIcon color={plusRotationAnim.interpolate({ inputRange: [0, 1], outputRange: [inactiveIconColor, colors.text] })} />
                                         </Animated.View>
                                     </Pressable>
                                 </View>
 
                                 {/* Action Icon: Send / Stop / Mic / Progress */}
-                                <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17 }} pointerEvents="auto">
+                                <View style={{ width: 34, height: 34, backgroundColor: glassBgColor, borderRadius: 17 }} pointerEvents="auto">
                                     {isProcessingDocument ? (
                                         <Reanimated.View key="process" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
                                             <ActivityIndicator size="small" color="#2DD4BF" />
@@ -1112,13 +1117,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                             <Pressable
                                                 onPress={handleSend}
                                                 style={styles.iconButton}>
-                                                <SendIcon size={18} color={sendBtnBgAnim.interpolate({ inputRange: [0, 1], outputRange: [secondaryTextColor, colors.text] })} />
+                                                <SendIcon size={18} color={sendBtnBgAnim.interpolate({ inputRange: [0, 1], outputRange: [inactiveIconColor, colors.text] })} />
                                             </Pressable>
                                         </Reanimated.View>
                                     ) : (
                                         <Reanimated.View key="mic" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
                                             <Pressable style={styles.iconButton}>
-                                                <MicIcon color={secondaryTextColor} size={18} />
+                                                <MicIcon color={inactiveIconColor} size={18} />
                                             </Pressable>
                                         </Reanimated.View>
                                     )}
@@ -1132,14 +1137,14 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         <Reanimated.View
                             entering={FadeIn.duration(250)}
                             exiting={FadeOut.duration(150)}
-                            style={[StyleSheet.absoluteFill, { zIndex: 1000, elevation: 10 }]}>
-                            <Pressable style={styles.plusMenuBackdrop} onPress={handleClosePlusMenu} />
+                            style={[StyleSheet.absoluteFill, { zIndex: 1000 }]}>
+                            <Pressable style={[styles.plusMenuBackdrop, { backgroundColor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)' }]} onPress={handleClosePlusMenu} />
                             <Animated.View
                                 style={[
                                     styles.plusMenuContainer,
                                     {
                                         position: 'absolute',
-                                        backgroundColor: colors.card,
+                                        backgroundColor: popupBgColor,
                                         borderColor: colors.border,
                                         bottom: Animated.add(inputHeightAnim, insets.bottom + 10),
                                         marginLeft: 0,
@@ -1149,25 +1154,43 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         }),
                                     },
                                 ]}>
-                                <Pressable
-                                    style={styles.plusMenuItem}
-                                    onPress={handlePickImage}>
-                                    <ImageIcon size={24} color="#FFF" />
-                                    <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
-                                        Upload Image
-                                    </Text>
-                                </Pressable>
+                                <Reanimated.View entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(150)}>
+                                    <Pressable
+                                        style={({ pressed }) => [
+                                            styles.plusMenuItem,
+                                            {
+                                                backgroundColor: pressed ? colors.border : (isDark ? colors.background : '#FFF'),
+                                                transform: [{ scale: pressed ? 0.96 : 1 }]
+                                            }
+                                        ]}
+                                        onPress={handlePickImage}>
+                                        <ImageIcon size={24} color={colors.text} />
+                                        <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
+                                            Upload Image
+                                        </Text>
+                                    </Pressable>
+                                </Reanimated.View>
 
-                                <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />
+                                <Reanimated.View entering={FadeIn.delay(50).duration(200)} exiting={FadeOut.duration(150)}>
+                                    <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />
+                                </Reanimated.View>
 
-                                <Pressable
-                                    style={styles.plusMenuItem}
-                                    onPress={handlePickDocument}>
-                                    <DocumentIcon size={24} color="#FFF" />
-                                    <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
-                                        Upload Files
-                                    </Text>
-                                </Pressable>
+                                <Reanimated.View entering={ZoomIn.delay(100).duration(200)} exiting={ZoomOut.duration(150)}>
+                                    <Pressable
+                                        style={({ pressed }) => [
+                                            styles.plusMenuItem,
+                                            {
+                                                backgroundColor: pressed ? colors.border : (isDark ? colors.background : '#FFF'),
+                                                transform: [{ scale: pressed ? 0.96 : 1 }]
+                                            }
+                                        ]}
+                                        onPress={handlePickDocument}>
+                                        <DocumentIcon size={24} color={colors.text} />
+                                        <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
+                                            Upload Files
+                                        </Text>
+                                    </Pressable>
+                                </Reanimated.View>
                             </Animated.View>
                         </Reanimated.View>
                     )}
@@ -1660,7 +1683,6 @@ const styles = StyleSheet.create({
     // --- Plus Menu Popup ---
     plusMenuBackdrop: {
         ...StyleSheet.absoluteFill,
-        backgroundColor: 'rgba(0,0,0,0.01)',
         justifyContent: 'flex-end',
         alignItems: 'flex-start',
         bottom: 5,
@@ -1670,17 +1692,14 @@ const styles = StyleSheet.create({
         borderRadius: 10,
         borderWidth: 1,
         minWidth: 180,
-        elevation: 8,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.15,
-        shadowRadius: 12,
-        padding: 10
+        padding: 10,
     },
     plusMenuItem: {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 12,
+        padding: 8,
+        borderRadius: 8,
     },
     plusMenuItemText: {
         fontSize: 15,

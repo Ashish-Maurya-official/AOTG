@@ -161,14 +161,10 @@ const ModelItem = memo(
                     {
                         backgroundColor: isLoaded
                             ? 'rgba(255, 255, 255, 0.08)'
-                            : isSelected
-                                ? 'rgba(255, 255, 255, 0.04)'
-                                : colors.background,
+                            : colors.background,
                         borderColor: isLoaded
                             ? 'rgba(255, 255, 255, 0.6)'
-                            : isSelected
-                                ? 'rgba(255, 255, 255, 0.2)'
-                                : colors.border,
+                            : colors.border,
                     },
                 ]}>
                 {/* Header */}
