@@ -1,7 +1,10 @@
 import React from 'react';
+import { Animated } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 
-const SendIcon = ({ size = 24, color = '#000' }) => {
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+const SendIcon = ({ size = 24, color = '#000' }: { size?: number; color?: any }) => {
     return (
         <Svg
             width={size}
@@ -9,14 +12,14 @@ const SendIcon = ({ size = 24, color = '#000' }) => {
             viewBox="0 0 24 24"
             fill="none"
         >
-            <Path
+            <AnimatedPath
                 d="m5 12 7-7 7 7"
                 stroke={color}
                 strokeWidth={2}
                 strokeLinecap="round"
                 strokeLinejoin="round"
             />
-            <Path
+            <AnimatedPath
                 d="M12 19V5"
                 stroke={color}
                 strokeWidth={2}

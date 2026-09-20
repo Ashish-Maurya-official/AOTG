@@ -161,10 +161,10 @@ const RobotIcon = memo(({ color, bgColor }: { color: string; bgColor: string }) 
     </View>
 ));
 
-const PlusIcon = memo(({ color }: { color: string }) => (
+const PlusIcon = memo(({ color }: { color: any }) => (
     <View style={styles.plusIconContainer}>
-        <View style={[styles.plusLineH, { backgroundColor: color }]} />
-        <View style={[styles.plusLineV, { backgroundColor: color }]} />
+        <Animated.View style={[styles.plusLineH, { backgroundColor: color }]} />
+        <Animated.View style={[styles.plusLineV, { backgroundColor: color }]} />
     </View>
 ));
 
@@ -285,6 +285,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const inputHeightAnim = useRef(new Animated.Value(INPUT_HEIGHT_NORMAL)).current;
     const borderRadiusAnim = useRef(new Animated.Value(70)).current;
     const plusRotationAnim = useRef(new Animated.Value(0)).current;
+    const sendBtnBgAnim = useRef(new Animated.Value(0)).current;
 
     const scrollViewRef = useRef<ScrollView>(null);
     const isAutoScrollEnabled = useRef(true);
@@ -377,6 +378,16 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             useNativeDriver: true,
         }).start();
     }, [isPlusMenuVisible, plusRotationAnim]);
+
+    const isSendActive = (inputText.trim().length > 0 || !!pendingAttachment) && !isProcessingDocument && !isGenerating;
+
+    useEffect(() => {
+        Animated.timing(sendBtnBgAnim, {
+            toValue: isSendActive ? 1 : 0,
+            duration: 200,
+            useNativeDriver: false,
+        }).start();
+    }, [isSendActive, sendBtnBgAnim]);
 
     const plusRotationStyle = {
         transform: [
@@ -682,33 +693,33 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 // Document processing path
                 setIsProcessingDocument(true);
                 setDocumentProgressMessage('Processing document...');
-                
+
                 const unsubscribe = documentService.onProgress((event) => {
                     setDocumentProgressMessage(event.message);
                 });
-                
+
                 try {
                     const filePath = attachment.uri.replace('file://', '');
                     const docResult = await documentService.processDocument(filePath);
                     unsubscribe();
-                    
+
                     if (docResult.warnings && docResult.warnings.length > 0) {
                         setMessages((prev) => [
                             ...prev,
                             { id: `${assistantMsgId}-warn`, role: 'assistant', text: `_Note: ${docResult.warnings.join(', ')}_` }
                         ]);
                     }
-                    
+
                     const maxTokens = 2000; // Leave room for response
                     const relevantContext = documentService.getRelevantContext(query, docResult.text, maxTokens);
-                    
+
                     let finalPrompt = query;
                     if (relevantContext) {
                         finalPrompt = `[Document Context from ${attachment.name}]\n${relevantContext}\n\nUser Question: ${query || 'Summarize the document.'}`;
                     } else {
                         finalPrompt = query || `[Attached file: ${attachment.name} - could not extract text]`;
                     }
-                    
+
                     response = await generate(finalPrompt);
                 } catch (docErr: any) {
                     unsubscribe();
@@ -1031,21 +1042,14 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         )}
 
                         {/* Input Row */}
-                        <View style={styles.inputRow}>
-                            {/* Plus button inside pill */}
-                            <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17, justifyContent: 'center', alignItems: 'center' }}>
-                                <Pressable
-                                    onPress={handleOpenPlusMenu}
-                                    style={styles.iconButton}>
-                                    <Animated.View style={plusRotationStyle}>
-                                        <PlusIcon color={secondaryTextColor} />
-                                    </Animated.View>
-                                </Pressable>
-                            </View>
-
+                        <View style={[styles.inputRow, isMultiline && { flexDirection: 'column', alignItems: 'stretch' }]}>
                             {/* TextInput */}
                             <TextInput
-                                style={[styles.input, { color: colors.text, maxHeight: 120 }]}
+                                style={[
+                                    styles.input,
+                                    { color: colors.text, maxHeight: 120 },
+                                    isMultiline ? { paddingLeft: 4, paddingRight: 4, minHeight: 40 } : { paddingLeft: 42, paddingRight: 42 }
+                                ]}
                                 placeholder="Message AI..."
                                 placeholderTextColor={secondaryTextColor}
                                 value={inputText}
@@ -1057,35 +1061,55 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 onBlur={collapse}
                             />
 
-                            {/* Action Icon: Send / Stop / Mic / Progress */}
-                            <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17 }}>
-                                {isProcessingDocument ? (
-                                    <Reanimated.View key="process" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                                        <ActivityIndicator size="small" color="#2DD4BF" />
-                                    </Reanimated.View>
-                                ) : isGenerating ? (
-                                    <Reanimated.View key="stop" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                                        <Pressable
-                                            onPress={stopGeneration}
-                                            style={styles.iconButton}>
-                                            <StopIcon color="#FF453A" />
-                                        </Pressable>
-                                    </Reanimated.View>
-                                ) : (inputText.trim().length > 0 || pendingAttachment) ? (
-                                    <Reanimated.View key="send" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                                        <Pressable
-                                            onPress={handleSend}
-                                            style={styles.iconButton}>
-                                            <SendIcon size={18} color={secondaryTextColor} />
-                                        </Pressable>
-                                    </Reanimated.View>
-                                ) : (
-                                    <Reanimated.View key="mic" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                                        <Pressable style={styles.iconButton}>
-                                            <MicIcon color={secondaryTextColor} size={18} />
-                                        </Pressable>
-                                    </Reanimated.View>
-                                )}
+                            {/* Actions Container */}
+                            <View
+                                style={isMultiline
+                                    ? { flexDirection: 'row', justifyContent: 'space-between', paddingTop: 4, paddingBottom: 6 }
+                                    : { position: 'absolute', left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }
+                                }
+                                pointerEvents="box-none"
+                            >
+                                {/* Plus button inside pill */}
+                                <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17, justifyContent: 'center', alignItems: 'center' }} pointerEvents="auto">
+                                    <Pressable
+                                        onPress={handleOpenPlusMenu}
+                                        style={styles.iconButton}>
+                                        <Animated.View style={plusRotationStyle}>
+                                            <PlusIcon color={plusRotationAnim.interpolate({ inputRange: [0, 1], outputRange: [secondaryTextColor, colors.text] })} />
+                                        </Animated.View>
+                                    </Pressable>
+                                </View>
+
+                                {/* Action Icon: Send / Stop / Mic / Progress */}
+                                <View style={{ width: 34, height: 34, backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 17 }} pointerEvents="auto">
+                                    {isProcessingDocument ? (
+                                        <Reanimated.View key="process" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                            <ActivityIndicator size="small" color="#2DD4BF" />
+                                        </Reanimated.View>
+                                    ) : isGenerating ? (
+                                        <Reanimated.View key="stop" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                            <Pressable
+                                                onPress={stopGeneration}
+                                                style={styles.iconButton}>
+                                                <StopIcon color="#FF453A" />
+                                            </Pressable>
+                                        </Reanimated.View>
+                                    ) : (inputText.trim().length > 0 || pendingAttachment) ? (
+                                        <Reanimated.View key="send" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                            <Pressable
+                                                onPress={handleSend}
+                                                style={styles.iconButton}>
+                                                <SendIcon size={18} color={sendBtnBgAnim.interpolate({ inputRange: [0, 1], outputRange: [secondaryTextColor, colors.text] })} />
+                                            </Pressable>
+                                        </Reanimated.View>
+                                    ) : (
+                                        <Reanimated.View key="mic" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                                            <Pressable style={styles.iconButton}>
+                                                <MicIcon color={secondaryTextColor} size={18} />
+                                            </Pressable>
+                                        </Reanimated.View>
+                                    )}
+                                </View>
                             </View>
                         </View>
                     </Animated.View>
@@ -1120,9 +1144,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         Upload Image
                                     </Text>
                                 </Pressable>
-                                
+
                                 <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />
-                                
+
                                 <Pressable
                                     style={styles.plusMenuItem}
                                     onPress={handlePickDocument}>
@@ -1157,10 +1181,12 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             <Modal visible={!!fullscreenImage} transparent={true} animationType="fade">
                 <View style={styles.fullscreenModalContainer}>
                     <Pressable
-                        style={styles.fullscreenCloseButton}
+                        style={[styles.fullscreenCloseButton, { top: insets.top + 10 }]}
                         onPress={() => setFullscreenImage(null)}
                     >
-                        <Text style={styles.fullscreenCloseText}>Close</Text>
+                        <View style={{ transform: [{ rotate: '45deg' }] }}>
+                            <PlusIcon color="#FFFFFF" />
+                        </View>
                     </Pressable>
 
                     {fullscreenImage && (
@@ -1651,7 +1677,7 @@ const styles = StyleSheet.create({
     },
     // --- Chat Attachment Rendering ---
     chatImagePreview: {
-        height: 180,
+        width: width * 0.6,
         borderRadius: 12,
         alignSelf: 'flex-start',
     },
@@ -1773,14 +1799,15 @@ const styles = StyleSheet.create({
     },
     fullscreenCloseButton: {
         position: 'absolute',
-        top: Platform.OS === 'ios' ? 60 : 40,
-        right: 20,
+        right: width * 0.035,
         zIndex: 100,
         elevation: 10,
-        paddingHorizontal: 16,
-        paddingVertical: 10,
-        backgroundColor: 'rgba(255, 255, 255, 0.25)',
-        borderRadius: 20,
+        width: 36,
+        height: 36,
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: 'rgba(20, 20, 0, 20.1)',
+        borderRadius: 18,
     },
     fullscreenCloseText: {
         color: '#FFF',
