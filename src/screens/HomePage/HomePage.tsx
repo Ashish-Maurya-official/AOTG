@@ -1151,7 +1151,16 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                     }
                                 }}
                                 multiline={true}
+                                submitBehavior="blurAndSubmit"
                                 returnKeyType="default"
+                                onKeyPress={({ nativeEvent }) => {
+                                    if (nativeEvent.key === 'Enter' && !shiftHeldRef.current) {
+                                        handleSend();
+                                        // Android inserts '\n' into the TextInput *after* onKeyPress fires.
+                                        // Clear it on the next tick so the field is truly empty after sending.
+                                        setTimeout(() => { setInputText(''); setIsMultiline(false); }, 0);
+                                    }
+                                }}
                                 onFocus={expand}
                                 onBlur={collapse}
 
