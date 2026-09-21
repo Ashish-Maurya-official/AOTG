@@ -83,7 +83,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
                                 styles.cell,
                                 { width: colWidths[index] }
                             ]}>
-                                <Text style={[styles.headerText, { color: colors.text }]}>
+                                <Text selectable style={[styles.headerText, { color: colors.text }]}>
                                     {renderInlineText(cell)}
                                 </Text>
                             </View>
@@ -101,7 +101,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
                                     styles.cell,
                                     { width: colWidths[cellIndex] }
                                 ]}>
-                                    <Text style={[styles.cellText, { color: colors.text }]}>
+                                    <Text selectable style={[styles.cellText, { color: colors.text }]}>
                                         {renderInlineText(cellText)}
                                     </Text>
                                 </View>

@@ -31,7 +31,7 @@ const TerminalBlock: React.FC<TerminalBlockProps> = ({ content }) => {
                 </Pressable>
             </View>
             <View style={styles.contentContainer}>
-                <Text style={styles.codeText}>$ {content}</Text>
+                <Text selectable style={styles.codeText}>$ {content}</Text>
             </View>
         </View>
     );

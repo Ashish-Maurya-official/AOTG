@@ -18,6 +18,7 @@ import {
     Platform,
     Pressable,
     ScrollView,
+    Share,
     StyleSheet,
     Text,
     TextInput,
@@ -53,6 +54,11 @@ import Reanimated, { ZoomIn, ZoomOut, FadeIn, FadeOut } from 'react-native-reani
 import SendIcon from '../../static/images/SVG/SendIcon';
 import ImageIcon from '../../static/images/SVG/ImageIcon';
 import DocumentIcon from '../../static/images/SVG/DocumentIcon';
+import CopyIcon from '../../static/images/SVG/CopyIcon';
+import ReloadIcon from '../../static/images/SVG/ReloadIcon';
+import ShareIcon from '../../static/images/SVG/ShareIcon';
+import EditIcon from '../../static/images/SVG/EditIcon';
+import Clipboard from '@react-native-clipboard/clipboard';
 import KeyEvent from 'react-native-keyevent';
 const { width, height: windowHeight } = Dimensions.get('window');
 
@@ -232,12 +238,14 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [isMultiline, setIsMultiline] = useState(false);
     const [isProcessingDocument, setIsProcessingDocument] = useState(false);
     const [documentProgressMessage, setDocumentProgressMessage] = useState<string>('');
+    const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
     // user would see a confusing "load error" message without this).
     const isAutoLoadingRef = useRef(false);
     const inputRef = useRef<TextInput>(null);
+    const editingMessageIdRef = useRef<string | null>(null);
     const wrapLengthRef = useRef(0);
     const initialHeightRef = useRef(0);
 
@@ -636,6 +644,17 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         setPendingAttachment(null);
         animateInputHeight(INPUT_HEIGHT_NORMAL);
 
+        // If editing a previous message, truncate from that point
+        const editId = editingMessageIdRef.current;
+        if (editId) {
+            setMessages((prev) => {
+                const idx = prev.findIndex((m) => m.id === editId);
+                if (idx >= 0) return prev.slice(0, idx);
+                return prev;
+            });
+            editingMessageIdRef.current = null;
+        }
+
         const userMsgId = Date.now().toString();
         const assistantMsgId = (Date.now() + 1).toString();
 
@@ -845,6 +864,74 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         animateInputHeight,
     ]);
 
+    // --- Message Action Handlers ---
+
+    const handleCopyMessage = useCallback((msgId: string, text: string) => {
+        Clipboard.setString(text);
+        setCopiedMessageId(msgId);
+        setTimeout(() => setCopiedMessageId(null), 2000);
+    }, []);
+
+    const handleShareMessage = useCallback(async (text: string) => {
+        try {
+            await Share.share({ message: text });
+        } catch (err: any) {
+            console.error('[HomePage] Share error:', err);
+        }
+    }, []);
+
+    const handleRegenerateMessage = useCallback(async (msgId: string) => {
+        if (isGenerating) return;
+
+        // Find the user message that triggered this assistant response
+        const msgIndex = messages.findIndex((m) => m.id === msgId);
+        if (msgIndex < 0) return;
+
+        // Find the preceding user message
+        let userMsg: ChatMessage | undefined;
+        for (let i = msgIndex - 1; i >= 0; i--) {
+            if (messages[i].role === 'user') {
+                userMsg = messages[i];
+                break;
+            }
+        }
+        if (!userMsg) return;
+
+        // Remove this assistant message and everything after it
+        setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === msgId);
+            if (idx < 0) return prev;
+            return prev.slice(0, idx);
+        });
+
+        // Re-generate using the original user query
+        const newAssistantId = Date.now().toString();
+        try {
+            const response = await generate(userMsg.text);
+            setMessages((prev) => [
+                ...prev,
+                { id: newAssistantId, role: 'assistant', text: response },
+            ]);
+        } catch (err: any) {
+            console.error('[HomePage] Regenerate error:', err);
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: newAssistantId,
+                    role: 'assistant',
+                    text: streamedText || 'Error: Could not regenerate the response. Please try again.',
+                },
+            ]);
+        }
+    }, [isGenerating, messages, generate, streamedText]);
+
+    const handleEditMessage = useCallback((msgId: string, text: string) => {
+        // Store the message ID — truncation happens on Send
+        editingMessageIdRef.current = msgId;
+        setInputText(text);
+        inputRef.current?.focus();
+    }, []);
+
     // Memoized dynamic styles
     const headerStyle = useMemo(
         () => [styles.header, { paddingTop: Math.max(insets.top + 8, 16) }],
@@ -974,68 +1061,116 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 showsVerticalScrollIndicator={false}
                                 keyboardShouldPersistTaps="handled">
                                 {messages.map((msg) => (
-                                    <View
-                                        key={msg.id}
-                                        style={[
-                                            styles.messageBubble,
-                                            msg.role === 'user'
-                                                ? [
-                                                    styles.userBubble,
-                                                    { backgroundColor: colors.card },
-                                                ]
-                                                : [styles.assistantBubble],
-                                        ]}>
-                                        {msg.role === 'assistant' && (
-                                            <View style={styles.assistantHeader}>
-                                                <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
-                                                <Text
-                                                    style={[
-                                                        styles.assistantModelTag,
-                                                        { color: colors.text },
-                                                    ]}>
-                                                    {selectedModel.name} (On-Device)
-                                                </Text>
-                                            </View>
-                                        )}
-                                        {msg.role === 'assistant' ? (
-                                            <MessageRenderer content={msg.text} />
-                                        ) : (
-                                            <View>
-                                                {/* Attachment preview inside user bubble */}
-                                                {msg.attachment && (
-                                                    SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
-                                                        <ChatImage
-                                                            uri={msg.attachment.uri}
-                                                            onPress={() => setFullscreenImage(msg.attachment!.uri)}
-                                                        />
-                                                    ) : (
-                                                        <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
-                                                            <FileIcon color={colors.primary} />
-                                                            <View style={styles.chatFileInfo}>
-                                                                <Text style={[styles.chatFileName, { color: colors.text }]} numberOfLines={1}>
-                                                                    {msg.attachment.name}
-                                                                </Text>
-                                                                {msg.attachment.size != null && (
-                                                                    <Text style={[styles.chatFileSize, { color: colors.secondaryText }]}>
-                                                                        {(msg.attachment.size / 1024).toFixed(0)} KB
-                                                                    </Text>
-                                                                )}
-                                                            </View>
-                                                        </View>
-                                                    )
-                                                )}
-                                                {msg.text.length > 0 && (
+                                    <View key={msg.id}>
+                                        <View
+                                            style={[
+                                                styles.messageBubble,
+                                                msg.role === 'user'
+                                                    ? [
+                                                        styles.userBubble,
+                                                        { backgroundColor: colors.card },
+                                                    ]
+                                                    : [styles.assistantBubble],
+                                            ]}>
+                                            {msg.role === 'assistant' && (
+                                                <View style={styles.assistantHeader}>
+                                                    <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
                                                     <Text
                                                         style={[
-                                                            styles.messageText,
+                                                            styles.assistantModelTag,
                                                             { color: colors.text },
-                                                            msg.attachment ? { marginTop: 8 } : undefined,
                                                         ]}>
-                                                        {msg.text}
+                                                        {selectedModel.name} (On-Device)
                                                     </Text>
+                                                </View>
+                                            )}
+                                            {msg.role === 'assistant' ? (
+                                                <MessageRenderer content={msg.text} />
+                                            ) : (
+                                                <View>
+                                                    {/* Attachment preview inside user bubble */}
+                                                    {msg.attachment && (
+                                                        SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
+                                                            <ChatImage
+                                                                uri={msg.attachment.uri}
+                                                                onPress={() => setFullscreenImage(msg.attachment!.uri)}
+                                                            />
+                                                        ) : (
+                                                            <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
+                                                                <FileIcon color={colors.primary} />
+                                                                <View style={styles.chatFileInfo}>
+                                                                    <Text style={[styles.chatFileName, { color: colors.text }]} numberOfLines={1}>
+                                                                        {msg.attachment.name}
+                                                                    </Text>
+                                                                    {msg.attachment.size != null && (
+                                                                        <Text style={[styles.chatFileSize, { color: colors.secondaryText }]}>
+                                                                            {(msg.attachment.size / 1024).toFixed(0)} KB
+                                                                        </Text>
+                                                                    )}
+                                                                </View>
+                                                            </View>
+                                                        )
+                                                    )}
+                                                    {msg.text.length > 0 && (
+                                                        <Text
+                                                            selectable
+                                                            style={[
+                                                                styles.messageText,
+                                                                { color: colors.text },
+                                                                msg.attachment ? { marginTop: 8 } : undefined,
+                                                            ]}>
+                                                            {msg.text}
+                                                        </Text>
+                                                    )}
+                                                </View>
+                                            )}
+                                        </View>
+
+                                        {/* Action Buttons */}
+                                        <View style={[
+                                            styles.actionBar,
+                                            msg.role === 'user' ? styles.actionBarUser : styles.actionBarAssistant,
+                                        ]}>
+                                            {/* Copy */}
+                                            <Pressable
+                                                onPress={() => handleCopyMessage(msg.id, msg.text)}
+                                                hitSlop={8}
+                                                style={styles.actionBtn}>
+                                                <CopyIcon size={15} color={colors.secondaryText} />
+                                                {copiedMessageId === msg.id && (
+                                                    <Text style={[styles.actionLabel, { color: colors.secondaryText }]}>Copied</Text>
                                                 )}
-                                            </View>
-                                        )}
+                                            </Pressable>
+
+                                            {/* Share */}
+                                            <Pressable
+                                                onPress={() => handleShareMessage(msg.text)}
+                                                hitSlop={8}
+                                                style={styles.actionBtn}>
+                                                <ShareIcon size={15} color={colors.secondaryText} />
+                                            </Pressable>
+
+                                            {/* Regenerate (assistant only) */}
+                                            {msg.role === 'assistant' && (
+                                                <Pressable
+                                                    onPress={() => handleRegenerateMessage(msg.id)}
+                                                    hitSlop={8}
+                                                    style={styles.actionBtn}
+                                                    disabled={isGenerating}>
+                                                    <ReloadIcon size={15} color={isGenerating ? colors.border : colors.secondaryText} />
+                                                </Pressable>
+                                            )}
+
+                                            {/* Edit (user only) */}
+                                            {msg.role === 'user' && (
+                                                <Pressable
+                                                    onPress={() => handleEditMessage(msg.id, msg.text)}
+                                                    hitSlop={8}
+                                                    style={styles.actionBtn}>
+                                                    <EditIcon size={15} color={colors.secondaryText} />
+                                                </Pressable>
+                                            )}
+                                        </View>
                                     </View>
                                 ))}
 
@@ -1493,6 +1628,31 @@ const styles = StyleSheet.create({
     messageText: {
         fontSize: 15,
         lineHeight: 22,
+    },
+    // --- Message Action Bar ---
+    actionBar: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 16,
+        paddingHorizontal: 4,
+        paddingTop: 6,
+        paddingBottom: 2,
+    },
+    actionBarAssistant: {
+        justifyContent: 'flex-start',
+    },
+    actionBarUser: {
+        justifyContent: 'flex-end',
+    },
+    actionBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        padding: 4,
+    },
+    actionLabel: {
+        fontSize: 11,
+        fontWeight: '500',
     },
     // Bottom Bar Styles
     bottomBar: {
