@@ -123,6 +123,126 @@ interface ChatMessage {
     attachment?: Attachment;
 }
 
+// --- Memoized Chat Message Item ---
+// Extracted so completed messages don't re-render during streaming.
+interface ChatMessageItemProps {
+    msg: ChatMessage;
+    modelName: string;
+    colors: any;
+    copiedMessageId: string | null;
+    isGenerating: boolean;
+    onCopy: (id: string, text: string) => void;
+    onShare: (text: string) => void;
+    onRegenerate: (id: string) => void;
+    onEdit: (id: string, text: string) => void;
+    onImagePress: (uri: string) => void;
+}
+
+const ChatMessageItem = memo(({
+    msg,
+    modelName,
+    colors,
+    copiedMessageId,
+    isGenerating,
+    onCopy,
+    onShare,
+    onRegenerate,
+    onEdit,
+    onImagePress,
+}: ChatMessageItemProps) => {
+    const isCopied = copiedMessageId === msg.id;
+
+    return (
+        <View>
+            <View
+                style={[
+                    styles.messageBubble,
+                    msg.role === 'user'
+                        ? [styles.userBubble, { backgroundColor: colors.card }]
+                        : [styles.assistantBubble],
+                ]}>
+                {msg.role === 'assistant' && (
+                    <View style={styles.assistantHeader}>
+                        <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
+                        <Text style={[styles.assistantModelTag, { color: colors.text }]}>
+                            {modelName} (On-Device)
+                        </Text>
+                    </View>
+                )}
+                {msg.role === 'assistant' ? (
+                    <MessageRenderer content={msg.text} />
+                ) : (
+                    <View>
+                        {msg.attachment && (
+                            SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
+                                <ChatImage
+                                    uri={msg.attachment.uri}
+                                    onPress={() => onImagePress(msg.attachment!.uri)}
+                                />
+                            ) : (
+                                <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
+                                    <FileIcon color={colors.primary} />
+                                    <View style={styles.chatFileInfo}>
+                                        <Text style={[styles.chatFileName, { color: colors.text }]} numberOfLines={1}>
+                                            {msg.attachment.name}
+                                        </Text>
+                                        {msg.attachment.size != null && (
+                                            <Text style={[styles.chatFileSize, { color: colors.secondaryText }]}>
+                                                {(msg.attachment.size / 1024).toFixed(0)} KB
+                                            </Text>
+                                        )}
+                                    </View>
+                                </View>
+                            )
+                        )}
+                        {msg.text.length > 0 && (
+                            <Text
+                                selectable
+                                style={[
+                                    styles.messageText,
+                                    { color: colors.text },
+                                    msg.attachment ? { marginTop: 8 } : undefined,
+                                ]}>
+                                {msg.text}
+                            </Text>
+                        )}
+                    </View>
+                )}
+            </View>
+
+            {/* Action Buttons */}
+            <View style={[
+                styles.actionBar,
+                msg.role === 'user' ? styles.actionBarUser : styles.actionBarAssistant,
+            ]}>
+                <Pressable onPress={() => onCopy(msg.id, msg.text)} hitSlop={8} style={styles.actionBtn}>
+                    <CopyIcon size={15} color={colors.secondaryText} />
+                    {isCopied && (
+                        <Text style={[styles.actionLabel, { color: colors.secondaryText }]}>Copied</Text>
+                    )}
+                </Pressable>
+                <Pressable onPress={() => onShare(msg.text)} hitSlop={8} style={styles.actionBtn}>
+                    <ShareIcon size={15} color={colors.secondaryText} />
+                </Pressable>
+                {msg.role === 'assistant' && (
+                    <Pressable
+                        onPress={() => onRegenerate(msg.id)}
+                        hitSlop={8}
+                        style={styles.actionBtn}
+                        disabled={isGenerating}>
+                        <ReloadIcon size={15} color={isGenerating ? colors.border : colors.secondaryText} />
+                    </Pressable>
+                )}
+                {msg.role === 'user' && (
+                    <Pressable onPress={() => onEdit(msg.id, msg.text)} hitSlop={8} style={styles.actionBtn}>
+                        <EditIcon size={15} color={colors.secondaryText} />
+                    </Pressable>
+                )}
+            </View>
+        </View>
+    );
+});
+
 // --- Memoized Custom Vector Icons ---
 const MenuIcon = memo(({ color }: { color: string }) => (
     <View style={styles.menuIconContainer}>
@@ -1061,117 +1181,19 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 showsVerticalScrollIndicator={false}
                                 keyboardShouldPersistTaps="handled">
                                 {messages.map((msg) => (
-                                    <View key={msg.id}>
-                                        <View
-                                            style={[
-                                                styles.messageBubble,
-                                                msg.role === 'user'
-                                                    ? [
-                                                        styles.userBubble,
-                                                        { backgroundColor: colors.card },
-                                                    ]
-                                                    : [styles.assistantBubble],
-                                            ]}>
-                                            {msg.role === 'assistant' && (
-                                                <View style={styles.assistantHeader}>
-                                                    <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
-                                                    <Text
-                                                        style={[
-                                                            styles.assistantModelTag,
-                                                            { color: colors.text },
-                                                        ]}>
-                                                        {selectedModel.name} (On-Device)
-                                                    </Text>
-                                                </View>
-                                            )}
-                                            {msg.role === 'assistant' ? (
-                                                <MessageRenderer content={msg.text} />
-                                            ) : (
-                                                <View>
-                                                    {/* Attachment preview inside user bubble */}
-                                                    {msg.attachment && (
-                                                        SUPPORTED_IMAGE_TYPES.includes(msg.attachment.type.toLowerCase()) ? (
-                                                            <ChatImage
-                                                                uri={msg.attachment.uri}
-                                                                onPress={() => setFullscreenImage(msg.attachment!.uri)}
-                                                            />
-                                                        ) : (
-                                                            <View style={[styles.chatFileCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
-                                                                <FileIcon color={colors.primary} />
-                                                                <View style={styles.chatFileInfo}>
-                                                                    <Text style={[styles.chatFileName, { color: colors.text }]} numberOfLines={1}>
-                                                                        {msg.attachment.name}
-                                                                    </Text>
-                                                                    {msg.attachment.size != null && (
-                                                                        <Text style={[styles.chatFileSize, { color: colors.secondaryText }]}>
-                                                                            {(msg.attachment.size / 1024).toFixed(0)} KB
-                                                                        </Text>
-                                                                    )}
-                                                                </View>
-                                                            </View>
-                                                        )
-                                                    )}
-                                                    {msg.text.length > 0 && (
-                                                        <Text
-                                                            selectable
-                                                            style={[
-                                                                styles.messageText,
-                                                                { color: colors.text },
-                                                                msg.attachment ? { marginTop: 8 } : undefined,
-                                                            ]}>
-                                                            {msg.text}
-                                                        </Text>
-                                                    )}
-                                                </View>
-                                            )}
-                                        </View>
-
-                                        {/* Action Buttons */}
-                                        <View style={[
-                                            styles.actionBar,
-                                            msg.role === 'user' ? styles.actionBarUser : styles.actionBarAssistant,
-                                        ]}>
-                                            {/* Copy */}
-                                            <Pressable
-                                                onPress={() => handleCopyMessage(msg.id, msg.text)}
-                                                hitSlop={8}
-                                                style={styles.actionBtn}>
-                                                <CopyIcon size={15} color={colors.secondaryText} />
-                                                {copiedMessageId === msg.id && (
-                                                    <Text style={[styles.actionLabel, { color: colors.secondaryText }]}>Copied</Text>
-                                                )}
-                                            </Pressable>
-
-                                            {/* Share */}
-                                            <Pressable
-                                                onPress={() => handleShareMessage(msg.text)}
-                                                hitSlop={8}
-                                                style={styles.actionBtn}>
-                                                <ShareIcon size={15} color={colors.secondaryText} />
-                                            </Pressable>
-
-                                            {/* Regenerate (assistant only) */}
-                                            {msg.role === 'assistant' && (
-                                                <Pressable
-                                                    onPress={() => handleRegenerateMessage(msg.id)}
-                                                    hitSlop={8}
-                                                    style={styles.actionBtn}
-                                                    disabled={isGenerating}>
-                                                    <ReloadIcon size={15} color={isGenerating ? colors.border : colors.secondaryText} />
-                                                </Pressable>
-                                            )}
-
-                                            {/* Edit (user only) */}
-                                            {msg.role === 'user' && (
-                                                <Pressable
-                                                    onPress={() => handleEditMessage(msg.id, msg.text)}
-                                                    hitSlop={8}
-                                                    style={styles.actionBtn}>
-                                                    <EditIcon size={15} color={colors.secondaryText} />
-                                                </Pressable>
-                                            )}
-                                        </View>
-                                    </View>
+                                    <ChatMessageItem
+                                        key={msg.id}
+                                        msg={msg}
+                                        modelName={selectedModel.name}
+                                        colors={colors}
+                                        copiedMessageId={copiedMessageId}
+                                        isGenerating={isGenerating}
+                                        onCopy={handleCopyMessage}
+                                        onShare={handleShareMessage}
+                                        onRegenerate={handleRegenerateMessage}
+                                        onEdit={handleEditMessage}
+                                        onImagePress={setFullscreenImage}
+                                    />
                                 ))}
 
                                 {/* Live Streaming Token Preview */}
