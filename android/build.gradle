@@ -30,3 +30,22 @@ allprojects {
         maven { url 'https://jitpack.io' }
     }
 }
+
+subprojects { project ->
+    if (project.name == "react-native-keyevent") {
+        def applyOverrides = {
+            if (project.hasProperty('android')) {
+                project.android {
+                    compileSdkVersion rootProject.ext.compileSdkVersion
+                }
+            }
+        }
+        if (project.state.executed) {
+            applyOverrides()
+        } else {
+            project.afterEvaluate {
+                applyOverrides()
+            }
+        }
+    }
+}

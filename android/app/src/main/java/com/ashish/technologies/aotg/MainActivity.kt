@@ -25,6 +25,11 @@ class MainActivity : ReactActivity() {
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
     KeyEventModule.getInstance().onKeyDownEvent(keyCode, event)
+    // Consume bare Enter so the TextInput doesn't insert a newline.
+    // Shift+Enter is allowed through for multiline editing.
+    if (keyCode == KeyEvent.KEYCODE_ENTER && event?.isShiftPressed == false) {
+      return true
+    }
     return super.onKeyDown(keyCode, event)
   }
 

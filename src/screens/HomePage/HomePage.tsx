@@ -239,6 +239,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const isAutoLoadingRef = useRef(false);
     const inputRef = useRef<TextInput>(null);
 
+    // Modifier key tracking for hardware keyboard shortcuts
+    const shiftHeldRef = useRef(false);
+    const ctrlHeldRef = useRef(false);
+
     // Native LLM Hook
     const {
         isGenerating,
@@ -257,15 +261,67 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         [selectedModelId]
     );
 
-    // Global Hardware Key Listener for F1 / Search
+    // Stable refs for handlers used inside the key listener so the
+    // effect never needs to re-register when these callbacks change.
+    const handleSendRef = useRef(handleSend);
+    handleSendRef.current = handleSend;
+    const handleNewChatRef = useRef(handleNewChat);
+    handleNewChatRef.current = handleNewChat;
+    const openModelSelectorRef = useRef(openModelSelector);
+    openModelSelectorRef.current = openModelSelector;
+
+    // Global Hardware Key Listener
+    // Android keyCodes: F1=131, F2=132, Search=84, Enter=66, Escape=111,
+    //   ShiftL=59, ShiftR=60, CtrlL=113, CtrlR=114, N=42, M=41
     useEffect(() => {
         KeyEvent.onKeyDownListener((keyEvent: any) => {
-            if (keyEvent.keyCode === 112 || keyEvent.keyCode === 84) {
+            const { keyCode } = keyEvent;
+
+            // ── Track modifier keys ──
+            if (keyCode === 59 || keyCode === 60) { shiftHeldRef.current = true; return; }
+            if (keyCode === 113 || keyCode === 114) { ctrlHeldRef.current = true; return; }
+
+            // ── F1 (131) or Search (84) → Focus input ──
+            if (keyCode === 131 || keyCode === 84) {
                 inputRef.current?.focus();
+                return;
+            }
+
+            // ── Enter (66) without Shift → Send message ──
+            // (Shift+Enter passes through natively to insert a newline)
+            if (keyCode === 66 && !shiftHeldRef.current) {
+                handleSendRef.current();
+                return;
+            }
+
+            // ── Ctrl+N (42) → New Chat ──
+            if (keyCode === 42 && ctrlHeldRef.current) {
+                handleNewChatRef.current();
+                return;
+            }
+
+            // ── Ctrl+M (41) or F2 (132) → Open Model Selector ──
+            if ((keyCode === 41 && ctrlHeldRef.current) || keyCode === 132) {
+                openModelSelectorRef.current();
+                return;
+            }
+
+            // ── Escape (111) → Dismiss keyboard ──
+            if (keyCode === 111) {
+                Keyboard.dismiss();
+                return;
             }
         });
+
+        KeyEvent.onKeyUpListener((keyEvent: any) => {
+            const { keyCode } = keyEvent;
+            if (keyCode === 59 || keyCode === 60) shiftHeldRef.current = false;
+            if (keyCode === 113 || keyCode === 114) ctrlHeldRef.current = false;
+        });
+
         return () => {
             KeyEvent.removeKeyDownListener();
+            KeyEvent.removeKeyUpListener();
         };
     }, []);
 
@@ -1076,7 +1132,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 returnKeyType="default"
                                 onFocus={expand}
                                 onBlur={collapse}
-                                onSubmitEditing={handleSend}
+
                             />
 
                             {/* Actions Container */}
