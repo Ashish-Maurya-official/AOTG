@@ -238,6 +238,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // user would see a confusing "load error" message without this).
     const isAutoLoadingRef = useRef(false);
     const inputRef = useRef<TextInput>(null);
+    const maxSingleLineLengthRef = useRef(0);
+    const lastTextRef = useRef('');
+    const initialHeightRef = useRef(0);
 
     // Modifier key tracking for hardware keyboard shortcuts
     const shiftHeldRef = useRef(false);
@@ -1126,8 +1129,29 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 placeholder="Message AI..."
                                 placeholderTextColor={secondaryTextColor}
                                 value={inputText}
-                                onChangeText={setInputText}
-                                onContentSizeChange={(e) => setIsMultiline(e.nativeEvent.contentSize.height > 45)}
+                                onChangeText={(text) => {
+                                    lastTextRef.current = text;
+                                    setInputText(text);
+                                    if (isMultiline && text.length <= maxSingleLineLengthRef.current) {
+                                        setIsMultiline(false);
+                                    }
+                                }}
+                                onContentSizeChange={(e) => {
+                                    const currentHeight = e.nativeEvent.contentSize.height;
+                                    
+                                    if (initialHeightRef.current === 0 || (currentHeight < initialHeightRef.current && currentHeight > 0)) {
+                                        initialHeightRef.current = currentHeight;
+                                    }
+
+                                    if (!isMultiline && initialHeightRef.current > 0) {
+                                        if (currentHeight > initialHeightRef.current + 10) {
+                                            setIsMultiline(true);
+                                        } else {
+                                            // As long as it hasn't wrapped, this text length is proven to safely fit on 1 line
+                                            maxSingleLineLengthRef.current = lastTextRef.current.length;
+                                        }
+                                    }
+                                }}
                                 multiline={true}
                                 returnKeyType="default"
                                 onFocus={expand}
