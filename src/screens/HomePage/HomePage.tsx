@@ -1132,13 +1132,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 value={inputText}
                                 onChangeText={(text) => {
                                     setInputText(text);
-                                    if (isMultiline && text.length < Math.max(1, wrapLengthRef.current - 2)) {
+                                    if (isMultiline && text.length <= Math.max(1, wrapLengthRef.current)) {
                                         setIsMultiline(false);
                                     }
                                 }}
                                 onContentSizeChange={(e) => {
                                     const currentHeight = e.nativeEvent.contentSize.height;
-                                    
+
                                     // Dynamically track the shortest height seen as the "1-line" height
                                     if (initialHeightRef.current === 0 || (currentHeight < initialHeightRef.current && currentHeight > 0)) {
                                         initialHeightRef.current = currentHeight;
