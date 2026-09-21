@@ -238,8 +238,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // user would see a confusing "load error" message without this).
     const isAutoLoadingRef = useRef(false);
     const inputRef = useRef<TextInput>(null);
-    const maxSingleLineLengthRef = useRef(0);
-    const lastTextRef = useRef('');
+    const wrapLengthRef = useRef(0);
     const initialHeightRef = useRef(0);
 
     // Modifier key tracking for hardware keyboard shortcuts
@@ -421,6 +420,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
         setMessages([]);
         setInputText('');
+        setIsMultiline(false);
         setPendingAttachment(null);
         inputHeightAnim.setValue(INPUT_HEIGHT_NORMAL);
         if (currentStatus === 'loaded') {
@@ -632,6 +632,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
         // Clear input state immediately
         setInputText('');
+        setIsMultiline(false);
         setPendingAttachment(null);
         animateInputHeight(INPUT_HEIGHT_NORMAL);
 
@@ -1130,26 +1131,23 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 placeholderTextColor={secondaryTextColor}
                                 value={inputText}
                                 onChangeText={(text) => {
-                                    lastTextRef.current = text;
                                     setInputText(text);
-                                    if (isMultiline && text.length <= maxSingleLineLengthRef.current) {
+                                    if (isMultiline && text.length < Math.max(1, wrapLengthRef.current - 2)) {
                                         setIsMultiline(false);
                                     }
                                 }}
                                 onContentSizeChange={(e) => {
                                     const currentHeight = e.nativeEvent.contentSize.height;
                                     
+                                    // Dynamically track the shortest height seen as the "1-line" height
                                     if (initialHeightRef.current === 0 || (currentHeight < initialHeightRef.current && currentHeight > 0)) {
                                         initialHeightRef.current = currentHeight;
                                     }
 
-                                    if (!isMultiline && initialHeightRef.current > 0) {
-                                        if (currentHeight > initialHeightRef.current + 10) {
-                                            setIsMultiline(true);
-                                        } else {
-                                            // As long as it hasn't wrapped, this text length is proven to safely fit on 1 line
-                                            maxSingleLineLengthRef.current = lastTextRef.current.length;
-                                        }
+                                    // If current height exceeds the 1-line baseline by >10px, it has wrapped
+                                    if (!isMultiline && initialHeightRef.current > 0 && currentHeight > initialHeightRef.current + 10) {
+                                        wrapLengthRef.current = inputText.length;
+                                        setIsMultiline(true);
                                     }
                                 }}
                                 multiline={true}
