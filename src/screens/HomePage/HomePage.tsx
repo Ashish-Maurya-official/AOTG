@@ -393,11 +393,12 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     // Stable refs for handlers used inside the key listener so the
     // effect never needs to re-register when these callbacks change.
-    const handleSendRef = useRef(handleSend);
+    // Initialized as null because the callbacks are defined below (after this line).
+    const handleSendRef = useRef<(() => void) | null>(null);
     handleSendRef.current = handleSend;
-    const handleNewChatRef = useRef(handleNewChat);
+    const handleNewChatRef = useRef<(() => void) | null>(null);
     handleNewChatRef.current = handleNewChat;
-    const openModelSelectorRef = useRef(openModelSelector);
+    const openModelSelectorRef = useRef<(() => void) | null>(null);
     openModelSelectorRef.current = openModelSelector;
 
     // Global Hardware Key Listener
@@ -420,19 +421,19 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             // ── Enter (66) without Shift → Send message ──
             // (Shift+Enter passes through natively to insert a newline)
             if (keyCode === 66 && !shiftHeldRef.current) {
-                handleSendRef.current();
+                handleSendRef.current?.();
                 return;
             }
 
             // ── Ctrl+N (42) → New Chat ──
             if (keyCode === 42 && ctrlHeldRef.current) {
-                handleNewChatRef.current();
+                handleNewChatRef.current?.();
                 return;
             }
 
             // ── Ctrl+M (41) or F2 (132) → Open Model Selector ──
             if ((keyCode === 41 && ctrlHeldRef.current) || keyCode === 132) {
-                openModelSelectorRef.current();
+                openModelSelectorRef.current?.();
                 return;
             }
 

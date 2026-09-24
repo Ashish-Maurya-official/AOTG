@@ -23,18 +23,32 @@ class MainActivity : ReactActivity() {
   override fun createReactActivityDelegate(): ReactActivityDelegate =
       DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
 
-  override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-    KeyEventModule.getInstance().onKeyDownEvent(keyCode, event)
-    // Consume bare Enter so the TextInput doesn't insert a newline.
-    // Shift+Enter is allowed through for multiline editing.
-    if (keyCode == KeyEvent.KEYCODE_ENTER && event?.isShiftPressed == false) {
+  /**
+   * dispatchKeyEvent fires before onKeyDown and gives us first shot at
+   * consuming key combinations before the system processes them.
+   */
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    // Forward every key event to react-native-keyevent
+    if (event.action == KeyEvent.ACTION_DOWN) {
+      KeyEventModule.getInstance().onKeyDownEvent(event.keyCode, event)
+    } else if (event.action == KeyEvent.ACTION_UP) {
+      KeyEventModule.getInstance().onKeyUpEvent(event.keyCode, event)
+    }
+
+    // Consume bare Enter (without Shift) so TextInput doesn't insert a newline
+    if (event.action == KeyEvent.ACTION_DOWN &&
+        event.keyCode == KeyEvent.KEYCODE_ENTER &&
+        !event.isShiftPressed) {
       return true
     }
-    return super.onKeyDown(keyCode, event)
-  }
 
-  override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-    KeyEventModule.getInstance().onKeyUpEvent(keyCode, event)
-    return super.onKeyUp(keyCode, event)
+    // Consume Ctrl+N and Ctrl+M to prevent system from handling them
+    if (event.isCtrlPressed) {
+      when (event.keyCode) {
+        KeyEvent.KEYCODE_N, KeyEvent.KEYCODE_M -> return true
+      }
+    }
+
+    return super.dispatchKeyEvent(event)
   }
 }
