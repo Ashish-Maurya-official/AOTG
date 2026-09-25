@@ -22,6 +22,9 @@ import PlayIcon from '../static/images/SVG/PlayIcon';
 import ReloadIcon from '../static/images/SVG/ReloadIcon';
 import LiveIcon from '../static/images/SVG/LiveIcon';
 import CpuIcon from '../static/images/SVG/CpuIcon';
+import GpuIcon from '../static/images/SVG/GpuIcon';
+import NpuIcon from '../static/images/SVG/NpuIcon';
+import AutoIcon from '../static/images/SVG/AutoIcon';
 import LoaderIcon from '../static/images/SVG/LoaderIcon';
 import DriveIcon from '../static/images/SVG/DriveIcon';
 import useLLM from '../hooks/useLLM';
@@ -57,11 +60,18 @@ interface ModelSelectorModalProps {
 }
 
 const BACKENDS: { key: BackendType; label: string; desc: string }[] = [
-    { key: 'AUTO', label: '⚡ Auto', desc: 'GPU → CPU' },
-    { key: 'NPU', label: '🧠 NPU', desc: 'NPU → GPU → CPU' },
-    { key: 'GPU', label: '🎮 GPU', desc: 'High Performance' },
-    { key: 'CPU', label: '⚙️ CPU', desc: 'Universal Fallback' },
+    { key: 'AUTO', label: 'Auto', desc: 'GPU → CPU' },
+    { key: 'NPU', label: 'NPU', desc: 'NPU → GPU → CPU' },
+    { key: 'GPU', label: 'GPU', desc: 'High Performance' },
+    { key: 'CPU', label: 'CPU', desc: 'Universal Fallback' },
 ];
+
+const BackendIcons: Record<string, React.FC<any>> = {
+    AUTO: AutoIcon,
+    NPU: NpuIcon,
+    GPU: GpuIcon,
+    CPU: CpuIcon,
+};
 
 /** Human-readable backend fallback chain — mirrors LLMModule.kt */
 const backendChainLabel = (backend: string): string => {
@@ -849,6 +859,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         <View style={styles.backendRow}>
                             {BACKENDS.map((b) => {
                                 const isChosen = preferredBackend === b.key;
+                                const IconComponent = BackendIcons[b.key];
                                 return (
                                     <Pressable
                                         key={b.key}
@@ -864,8 +875,17 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                                 borderColor: isChosen
                                                     ? colors.text
                                                     : 'rgba(128, 128, 128, 0.25)',
+                                                flexDirection: 'row',
+                                                alignItems: 'center',
+                                                gap: 6,
                                             },
                                         ]}>
+                                        {IconComponent && (
+                                            <IconComponent
+                                                color={isChosen ? colors.background : colors.text}
+                                                size={16}
+                                            />
+                                        )}
                                         <Text
                                             style={[
                                                 styles.backendTabText,
