@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { useTheme } from '../../theme/ThemeProvider';
+import { InlineText } from './InlineText';
 
 interface TableBlockProps {
     content: string;
@@ -45,27 +46,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
         return Math.max(60, Math.min(maxLen * 8 + 32, 300));
     });
 
-    const renderInlineText = (text: string) => {
-        const parts = text.split(/(\*\*.*?\*\*|\*[^\*]+\*|`.*?`|\$[\s\S]*?\$)/g);
 
-        return parts.map((part, index) => {
-            if (part.startsWith('**') && part.endsWith('**')) {
-                return <Text key={index} style={{ fontWeight: 'bold' }}>{part.slice(2, -2)}</Text>;
-            }
-            if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
-                return <Text key={index} style={{ fontStyle: 'italic' }}>{part.slice(1, -1)}</Text>;
-            }
-            if (part.startsWith('`') && part.endsWith('`')) {
-                return <Text key={index} style={[styles.inlineCode, { backgroundColor: colors.border }]}>{part.slice(1, -1)}</Text>;
-            }
-            if (part.startsWith('$') && part.endsWith('$')) {
-                let mathContent = part.slice(1, -1).replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←').replace(/\\log/g, 'log');
-                return <Text key={index} style={{ fontStyle: 'italic', color: '#10A37F', fontWeight: '500' }}>{mathContent}</Text>;
-            }
-            let cleaned = part.replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←');
-            return <Text key={index}>{cleaned}</Text>;
-        });
-    };
 
     return (
         <View style={[styles.wrapper]}>
@@ -84,7 +65,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
                                 { width: colWidths[index] }
                             ]}>
                                 <Text selectable style={[styles.headerText, { color: colors.text }]}>
-                                    {renderInlineText(cell)}
+                                    <InlineText text={cell} />
                                 </Text>
                             </View>
                         ))}
@@ -102,7 +83,7 @@ const TableBlock: React.FC<TableBlockProps> = ({ content }) => {
                                     { width: colWidths[cellIndex] }
                                 ]}>
                                     <Text selectable style={[styles.cellText, { color: colors.text }]}>
-                                        {renderInlineText(cellText)}
+                                        <InlineText text={cellText} />
                                     </Text>
                                 </View>
                             ))}

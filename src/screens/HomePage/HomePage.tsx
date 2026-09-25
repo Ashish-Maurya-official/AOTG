@@ -60,6 +60,8 @@ import ShareIcon from '../../static/images/SVG/ShareIcon';
 import EditIcon from '../../static/images/SVG/EditIcon';
 import Clipboard from '@react-native-clipboard/clipboard';
 import KeyEvent from 'react-native-keyevent';
+import { MenuIcon, ChevronDownIcon, RobotIcon, PlusIcon, StopIcon, CloseIcon, FileIcon } from '../../components/SharedIcons';
+
 const { width, height: windowHeight } = Dimensions.get('window');
 
 const ChatImage = memo(({ uri, onPress }: { uri: string; onPress: () => void }) => {
@@ -244,89 +246,7 @@ const ChatMessageItem = memo(({
 });
 
 // --- Memoized Custom Vector Icons ---
-const MenuIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.menuIconContainer}>
-        <View style={[styles.menuLine, { backgroundColor: color }]} />
-        <View style={[styles.menuLine, { backgroundColor: color }]} />
-        <View style={[styles.menuLine, { backgroundColor: color }]} />
-    </View>
-));
-
-const ChevronDownIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.chevronContainer}>
-        <View style={[styles.chevronLeft, { backgroundColor: color }]} />
-        <View style={[styles.chevronRight, { backgroundColor: color }]} />
-    </View>
-));
-
-const RobotIcon = memo(({ color, bgColor }: { color: string; bgColor: string }) => (
-    <View style={styles.robotContainer}>
-        {/* Antenna */}
-        <View style={styles.robotAntennaContainer}>
-            <View style={[styles.robotAntennaKnob, { backgroundColor: color }]} />
-            <View style={[styles.robotAntennaStem, { backgroundColor: color }]} />
-        </View>
-
-        {/* Head and Ears row */}
-        <View style={styles.robotHeadRow}>
-            {/* Left Ear */}
-            <View style={[styles.robotEar, { backgroundColor: color }]} />
-
-            {/* Face */}
-            <View style={[styles.robotFace, { backgroundColor: color }]}>
-                {/* Eyes */}
-                <View style={styles.robotEyesRow}>
-                    <View style={[styles.robotEye, { backgroundColor: bgColor }]} />
-                    <View style={[styles.robotEye, { backgroundColor: bgColor }]} />
-                </View>
-                {/* Mouth */}
-                <View style={[styles.robotMouth, { backgroundColor: bgColor }]} />
-            </View>
-
-            {/* Right Ear */}
-            <View style={[styles.robotEar, { backgroundColor: color }]} />
-        </View>
-    </View>
-));
-
-const PlusIcon = memo(({ color }: { color: any }) => (
-    <View style={styles.plusIconContainer}>
-        <Animated.View style={[styles.plusLineH, { backgroundColor: color }]} />
-        <Animated.View style={[styles.plusLineV, { backgroundColor: color }]} />
-    </View>
-));
-
-const StopIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.stopIconContainer}>
-        <View style={[styles.stopSquare, { backgroundColor: color }]} />
-    </View>
-));
-
-
-const UploadIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.uploadIconContainer}>
-        {/* Arrow up */}
-        <View style={[styles.uploadArrowStem, { backgroundColor: color }]} />
-        <View style={[styles.uploadArrowLeft, { backgroundColor: color }]} />
-        <View style={[styles.uploadArrowRight, { backgroundColor: color }]} />
-        {/* Tray */}
-        <View style={[styles.uploadTray, { borderColor: color }]} />
-    </View>
-));
-
-const CloseIcon = memo(({ color, size = 16 }: { color: string; size?: number }) => (
-    <View style={[styles.closeIconContainer, { width: size, height: size }]}>
-        <View style={[styles.closeLine1, { backgroundColor: color, width: size * 0.7 }]} />
-        <View style={[styles.closeLine2, { backgroundColor: color, width: size * 0.7 }]} />
-    </View>
-));
-
-const FileIcon = memo(({ color }: { color: string }) => (
-    <View style={styles.fileIconContainer}>
-        <View style={[styles.fileBody, { borderColor: color }]} />
-        <View style={[styles.fileFold, { borderColor: color, backgroundColor: color + '20' }]} />
-    </View>
-));
+// (Moved to SharedIcons.tsx)
 
 const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const theme = useTheme();
@@ -364,7 +284,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
     // user would see a confusing "load error" message without this).
     const isAutoLoadingRef = useRef(false);
-    const inputRef = useRef<TextInput>(null);
+    const inputRef = useRef<any>(null);
     const editingMessageIdRef = useRef<string | null>(null);
     const wrapLengthRef = useRef(0);
     const initialHeightRef = useRef(0);
@@ -394,12 +314,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     // Stable refs for handlers used inside the key listener so the
     // effect never needs to re-register when these callbacks change.
     // Initialized as null because the callbacks are defined below (after this line).
+    // Refs for keyboard shortcuts (assigned below before return)
     const handleSendRef = useRef<(() => void) | null>(null);
-    handleSendRef.current = handleSend;
     const handleNewChatRef = useRef<(() => void) | null>(null);
-    handleNewChatRef.current = handleNewChat;
     const openModelSelectorRef = useRef<(() => void) | null>(null);
-    openModelSelectorRef.current = openModelSelector;
 
     // Global Hardware Key Listener
     // Android keyCodes: F1=131, F2=132, Search=84, Enter=66, Escape=111,
@@ -615,79 +533,12 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         setIsPlusMenuVisible(false);
     }, []);
 
-    const handlePickImage = useCallback(async () => {
+    const handlePickFile = useCallback(async (isImage: boolean) => {
         setIsPlusMenuVisible(false);
         try {
-            const result = await pick({
-                mode: 'import',
-                type: [
-                    DocumentPickerTypes.images,
-                ],
-            });
-
-            const file = result[0];
-            if (!file) return;
-
-            const fileType = file.type || '';
-            const fileSize = file.size || 0;
-
-            // Validate file type
-            if (!SUPPORTED_IMAGE_TYPES.includes(fileType.toLowerCase())) {
-                Alert.alert(
-                    'Unsupported File',
-                    `"${file.name}" is not a supported image type. Supported: JPEG, PNG, WebP, GIF.`,
-                    [{ text: 'OK' }]
-                );
-                return;
-            }
-
-            // Validate file size
-            if (fileSize > MAX_FILE_SIZE_BYTES) {
-                Alert.alert(
-                    'File Too Large',
-                    `"${file.name}" is ${(fileSize / (1024 * 1024)).toFixed(1)} MB. Maximum allowed is 10 MB.`,
-                    [{ text: 'OK' }]
-                );
-                return;
-            }
-
-            // Cache a local copy of the file for native modules
-            let fileUri = file.uri;
-            try {
-                const copyResult = await keepLocalCopy({
-                    files: [{ uri: file.uri, fileName: file.name || 'file' }],
-                    destination: 'cachesDirectory',
-                });
-                if (copyResult[0].status === 'success') {
-                    fileUri = copyResult[0].localUri;
-                }
-            } catch (copyErr) {
-                console.warn('[HomePage] Failed to create local copy:', copyErr);
-            }
-
-            setPendingAttachment({
-                uri: fileUri,
-                name: file.name || 'file',
-                type: fileType,
-                size: fileSize,
-            });
-            animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
-        } catch (err: any) {
-            if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
-                // User cancelled — no state change
-                return;
-            }
-            console.error('[HomePage] Image pick error:', err);
-            Alert.alert('Error', 'Could not pick image. Please try again.', [{ text: 'OK' }]);
-        }
-    }, [animateInputHeight]);
-
-    const handlePickDocument = useCallback(async () => {
-        setIsPlusMenuVisible(false);
-        try {
-            const result = await pick({
-                mode: 'import',
-                type: [
+            const type = isImage 
+                ? [DocumentPickerTypes.images]
+                : [
                     DocumentPickerTypes.pdf,
                     DocumentPickerTypes.plainText,
                     DocumentPickerTypes.csv,
@@ -696,16 +547,24 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     DocumentPickerTypes.xls,
                     DocumentPickerTypes.xlsx,
                     DocumentPickerTypes.audio,
-                ],
-            });
+                ];
 
+            const result = await pick({ mode: 'import', type });
             const file = result[0];
             if (!file) return;
 
             const fileType = file.type || '';
             const fileSize = file.size || 0;
 
-            // Validate file size
+            if (isImage && !SUPPORTED_IMAGE_TYPES.includes(fileType.toLowerCase())) {
+                Alert.alert(
+                    'Unsupported File',
+                    `"${file.name}" is not a supported image type. Supported: JPEG, PNG, WebP, GIF.`,
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
             if (fileSize > MAX_FILE_SIZE_BYTES) {
                 Alert.alert(
                     'File Too Large',
@@ -715,7 +574,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 return;
             }
 
-            // Cache a local copy of the file for native modules
             let fileUri = file.uri;
             try {
                 const copyResult = await keepLocalCopy({
@@ -737,11 +595,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             });
             animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
         } catch (err: any) {
-            if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
-                // User cancelled — no state change
-                return;
-            }
-            console.error('[HomePage] Document pick error:', err);
+            if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) return;
+            console.error('[HomePage] handlePickFile error:', err);
             Alert.alert('Error', 'Could not pick file. Please try again.', [{ text: 'OK' }]);
         }
     }, [animateInputHeight]);
@@ -1082,6 +937,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     const hasMessages = messages.length > 0 || isGenerating;
 
+    // --- Assign shortcut refs ---
+    handleSendRef.current = handleSend;
+    handleNewChatRef.current = handleNewChat;
+    openModelSelectorRef.current = openModelSelector;
+
     return (
         <View style={{ flex: 1 }}>
             <KeyboardAvoidingView
@@ -1408,7 +1268,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                                 transform: [{ scale: pressed ? 0.96 : 1 }]
                                             }
                                         ]}
-                                        onPress={handlePickImage}>
+                                        onPress={() => handlePickFile(true)}>
                                         <ImageIcon size={24} color={colors.text} />
                                         <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                             Upload Image
@@ -1429,7 +1289,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                                 transform: [{ scale: pressed ? 0.96 : 1 }]
                                             }
                                         ]}
-                                        onPress={handlePickDocument}>
+                                        onPress={() => handlePickFile(false)}>
                                         <DocumentIcon size={24} color={colors.text} />
                                         <Text style={[styles.plusMenuItemText, { color: colors.text }]}>
                                             Upload Files

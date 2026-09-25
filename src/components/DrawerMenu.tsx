@@ -12,14 +12,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme/ThemeProvider';
-
-// --- Icons ---
-const PlusIcon = memo(({ color }: { color: string }) => (
-    <View style={iconStyles.plusIconContainer}>
-        <View style={[iconStyles.plusLineH, { backgroundColor: color }]} />
-        <View style={[iconStyles.plusLineV, { backgroundColor: color }]} />
-    </View>
-));
+import { PlusIcon, AgentIcon } from './SharedIcons';
 
 const ChatIcon = memo(({ color }: { color: string }) => (
     <View style={[iconStyles.chatIconContainer, { borderColor: color }]}>
@@ -35,13 +28,6 @@ const SettingsIcon = memo(({ color }: { color: string }) => (
     </View>
 ));
 
-const AgentIcon = memo(({ color }: { color: string }) => (
-    <View style={iconStyles.agentIconContainer}>
-        <View style={[iconStyles.agentCircle, { borderColor: color }]} />
-        <View style={[iconStyles.agentDotLeft, { backgroundColor: color }]} />
-        <View style={[iconStyles.agentDotRight, { backgroundColor: color }]} />
-    </View>
-));
 
 const { width, height } = Dimensions.get('window');
 const DRAWER_WIDTH = width * 0.75;
@@ -257,24 +243,6 @@ const styles = StyleSheet.create({
 });
 
 const iconStyles = StyleSheet.create({
-    plusIconContainer: {
-        width: 20,
-        height: 20,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    plusLineH: {
-        position: 'absolute',
-        width: 14,
-        height: 2,
-        borderRadius: 1,
-    },
-    plusLineV: {
-        position: 'absolute',
-        width: 2,
-        height: 14,
-        borderRadius: 1,
-    },
     chatIconContainer: {
         width: 18,
         height: 18,
@@ -315,34 +283,6 @@ const iconStyles = StyleSheet.create({
         width: 6,
         height: 6,
         borderRadius: 3,
-    },
-    agentIconContainer: {
-        width: 22,
-        height: 22,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    agentCircle: {
-        width: 18,
-        height: 18,
-        borderRadius: 9,
-        borderWidth: 2,
-    },
-    agentDotLeft: {
-        position: 'absolute',
-        width: 4,
-        height: 4,
-        borderRadius: 2,
-        left: 5,
-        top: 7,
-    },
-    agentDotRight: {
-        position: 'absolute',
-        width: 4,
-        height: 4,
-        borderRadius: 2,
-        right: 5,
-        top: 7,
     },
 });
 

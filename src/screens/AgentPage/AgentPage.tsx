@@ -32,86 +32,7 @@ import {AVAILABLE_MODELS} from '../../store/slices/llmSlice';
 
 const {width} = Dimensions.get('window');
 
-// ─────────────────────────────────────────────────────────────
-// Icons (pure View-based, no dependencies)
-// ─────────────────────────────────────────────────────────────
-
-const BackArrowIcon = memo(({color}: {color: string}) => (
-  <View style={iconStyles.backArrow}>
-    <View
-      style={[
-        iconStyles.backArrowLine1,
-        {backgroundColor: color},
-      ]}
-    />
-    <View
-      style={[
-        iconStyles.backArrowLine2,
-        {backgroundColor: color},
-      ]}
-    />
-    <View
-      style={[
-        iconStyles.backArrowShaft,
-        {backgroundColor: color},
-      ]}
-    />
-  </View>
-));
-
-const AgentIcon = memo(({color, size = 20}: {color: string; size?: number}) => (
-  <View style={[iconStyles.agentIcon, {width: size, height: size}]}>
-    <View
-      style={[
-        iconStyles.agentEye,
-        {
-          backgroundColor: color,
-          width: size * 0.25,
-          height: size * 0.25,
-          borderRadius: size * 0.125,
-          left: size * 0.2,
-          top: size * 0.3,
-        },
-      ]}
-    />
-    <View
-      style={[
-        iconStyles.agentEye,
-        {
-          backgroundColor: color,
-          width: size * 0.25,
-          height: size * 0.25,
-          borderRadius: size * 0.125,
-          right: size * 0.2,
-          top: size * 0.3,
-        },
-      ]}
-    />
-    <View
-      style={[
-        iconStyles.agentMouth,
-        {
-          borderBottomColor: color,
-          width: size * 0.4,
-          bottom: size * 0.2,
-        },
-      ]}
-    />
-  </View>
-));
-
-const PlayIcon = memo(({color}: {color: string}) => (
-  <View
-    style={[
-      iconStyles.playTriangle,
-      {borderLeftColor: color},
-    ]}
-  />
-));
-
-const StopIcon = memo(({color}: {color: string}) => (
-  <View style={[iconStyles.stopSquare, {backgroundColor: color}]} />
-));
+import { BackArrowIcon, AgentIcon, PlayIcon, StopIcon } from '../../components/SharedIcons';
 
 // ─────────────────────────────────────────────────────────────
 // Step Status Indicator
@@ -615,7 +536,7 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
           <Pressable
             style={[styles.cancelBtn, {backgroundColor: colors.error + '15'}]}
             onPress={handleCancel}>
-            <StopIcon color={colors.error} />
+            <StopIcon color={colors.error} size={14} radius={3} />
             <Text style={[styles.cancelBtnText, {color: colors.error}]}>
               Cancel
             </Text>
@@ -871,64 +792,5 @@ const stepStyles = StyleSheet.create({
   },
 });
 
-const iconStyles = StyleSheet.create({
-  backArrow: {
-    width: 22,
-    height: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  backArrowLine1: {
-    position: 'absolute',
-    width: 10,
-    height: 2,
-    borderRadius: 1,
-    transform: [{rotate: '-45deg'}, {translateY: -3}],
-    left: 2,
-  },
-  backArrowLine2: {
-    position: 'absolute',
-    width: 10,
-    height: 2,
-    borderRadius: 1,
-    transform: [{rotate: '45deg'}, {translateY: 3}],
-    left: 2,
-  },
-  backArrowShaft: {
-    position: 'absolute',
-    width: 16,
-    height: 2,
-    borderRadius: 1,
-    left: 2,
-  },
-  agentIcon: {
-    position: 'relative',
-  },
-  agentEye: {
-    position: 'absolute',
-  },
-  agentMouth: {
-    position: 'absolute',
-    alignSelf: 'center',
-    height: 0,
-    borderBottomWidth: 2,
-    borderRadius: 2,
-  },
-  playTriangle: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 14,
-    borderTopWidth: 9,
-    borderBottomWidth: 9,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    marginLeft: 3,
-  },
-  stopSquare: {
-    width: 14,
-    height: 14,
-    borderRadius: 3,
-  },
-});
 
 export default memo(AgentPage);
