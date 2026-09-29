@@ -12,7 +12,10 @@ import {
     StyleSheet,
     Text,
     View,
+    Linking,
+    PermissionsAndroid,
 } from 'react-native';
+import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import { useSelector, useDispatch } from 'react-redux';
 import { useTheme } from '../theme/ThemeProvider';
 import { RootState } from '../store/store';
@@ -46,6 +49,7 @@ import {
     deleteModel,
     unloadModel,
 } from '../store/slices/llmSlice';
+import PermissionModal from './PermissionModal';
 import LLMService, {
     DownloadProgressEvent,
     DownloadCompleteEvent,
@@ -118,6 +122,7 @@ const ModelItem = memo(
         onUnload,
         onDelete,
         onSelect,
+        onImport,
         preferredBackend,
         isUnloading,
         colors,
@@ -132,6 +137,7 @@ const ModelItem = memo(
         onUnload: () => void;
         onDelete: () => void;
         onSelect: () => void;
+        onImport: () => void;
         preferredBackend: string;
         isUnloading: boolean;
         colors: any;
@@ -301,24 +307,65 @@ const ModelItem = memo(
                 <View style={styles.actionContainer}>
                     {/* Status 1: Not Downloaded */}
                     {status === 'not_downloaded' && (
-                        <Pressable
-                            onPress={onDownload}
-                            style={[
-                                styles.downloadButton,
-                                {
-                                    backgroundColor: colors.card,
-                                    borderColor: colors.border,
-                                },
-                            ]}>
-                            <DownloadIcon color={colors.text} size={18} />
-                            <Text
+                        <View style={{ gap: 8 }}>
+                            <Pressable
+                                onPress={onDownload}
                                 style={[
-                                    styles.buttonText,
-                                    { color: colors.text },
+                                    styles.downloadButton,
+                                    {
+                                        backgroundColor: colors.card,
+                                        borderColor: colors.border,
+                                    },
                                 ]}>
-                                Download from HuggingFace ({model.size})
-                            </Text>
-                        </Pressable>
+                                <DownloadIcon color={colors.text} size={18} />
+                                <Text
+                                    style={[
+                                        styles.buttonText,
+                                        { color: colors.text },
+                                    ]}>
+                                    Download from HuggingFace ({model.size})
+                                </Text>
+                            </Pressable>
+                            
+                            <View style={{ flexDirection: 'row', gap: 8 }}>
+                                <Pressable
+                                    onPress={() => Linking.openURL(model.url)}
+                                    style={[
+                                        styles.downloadButton,
+                                        {
+                                            flex: 1,
+                                            backgroundColor: 'transparent',
+                                            borderColor: colors.border,
+                                        },
+                                    ]}>
+                                    <Text
+                                        style={[
+                                            styles.buttonText,
+                                            { color: colors.secondaryText, fontSize: 13 },
+                                        ]}>
+                                        Save to Device
+                                    </Text>
+                                </Pressable>
+                                <Pressable
+                                    onPress={onImport}
+                                    style={[
+                                        styles.downloadButton,
+                                        {
+                                            flex: 1,
+                                            backgroundColor: 'rgba(128, 128, 128, 0.08)',
+                                            borderColor: colors.border,
+                                        },
+                                    ]}>
+                                    <Text
+                                        style={[
+                                            styles.buttonText,
+                                            { color: colors.secondaryText, fontSize: 13 },
+                                        ]}>
+                                        Import from Device
+                                    </Text>
+                                </Pressable>
+                            </View>
+                        </View>
                     )}
 
                     {/* Status 2: Downloading */}
@@ -565,6 +612,57 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         (state: RootState) => state.llm.loadedModelId
     );
 
+    // Permission Handling State
+    const [showPermissionModal, setShowPermissionModal] = React.useState(false);
+    const [isPermanentlyDenied, setIsPermanentlyDenied] = React.useState(false);
+    const pendingAction = React.useRef<(() => void) | null>(null);
+
+    const executeWithPermission = React.useCallback(async (action: () => void) => {
+        if (Platform.OS !== 'android' || Number(Platform.Version) >= 33) {
+            action();
+            return;
+        }
+
+        const hasPermission = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+        if (hasPermission) {
+            action();
+        } else {
+            pendingAction.current = action;
+            setShowPermissionModal(true);
+        }
+    }, []);
+
+    const handleGrantPermission = React.useCallback(async () => {
+        if (isPermanentlyDenied) {
+            Linking.openSettings();
+            setShowPermissionModal(false);
+            return;
+        }
+
+        try {
+            const result = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+            if (result === PermissionsAndroid.RESULTS.GRANTED) {
+                setShowPermissionModal(false);
+                if (pendingAction.current) {
+                    pendingAction.current();
+                    pendingAction.current = null;
+                }
+            } else if (result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
+                setIsPermanentlyDenied(true);
+            } else {
+                setShowPermissionModal(false);
+            }
+        } catch (err) {
+            console.warn(err);
+            setShowPermissionModal(false);
+        }
+    }, [isPermanentlyDenied]);
+
+    const handleCancelPermission = React.useCallback(() => {
+        setShowPermissionModal(false);
+        pendingAction.current = null;
+    }, []);
+
     // Sync disk state for all models on mount & when modal opens
     useEffect(() => {
         if (!visible) return;
@@ -674,6 +772,39 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         error: err?.message || 'Download failed',
                     })
                 );
+            }
+        },
+        [dispatch]
+    );
+
+    // Import Model Handler
+    const handleImportModel = useCallback(
+        async (model: ModelInfo) => {
+            try {
+                const result = await pick({
+                    type: [DocumentPickerTypes.allFiles],
+                    copyTo: 'cachesDirectory',
+                });
+                if (result && result.length > 0) {
+                    const pickedFile = result[0];
+                    if (pickedFile.name && !pickedFile.name.endsWith('.litertlm')) {
+                        Alert.alert('Invalid File', `Please select a valid .litertlm model file for ${model.name}.`);
+                        return;
+                    }
+                    const copyUri = (pickedFile as any).fileCopyUri;
+                    const localPath = copyUri ? copyUri.replace('file://', '') : pickedFile.uri.replace('file://', '');
+                    
+                    dispatch(setDownloaded({
+                        modelId: model.id,
+                        localPath: localPath,
+                    }));
+                    Alert.alert('Model Imported', `${model.name} has been imported from your device and is ready to load!`);
+                }
+            } catch (err: any) {
+                if (isErrorWithCode(err) && (err.code === errorCodes.IN_PROGRESS || err.code === errorCodes.OPERATION_CANCELED)) {
+                    return;
+                }
+                Alert.alert('Import Failed', 'Could not pick or process the model file from your device.');
             }
         },
         [dispatch]
@@ -994,6 +1125,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                         onSelectModel(model.id);
                                         closeModal();
                                     }}
+                                    onImport={() => executeWithPermission(() => handleImportModel(model))}
                                     preferredBackend={preferredBackend}
                                     isUnloading={unloadingModelId === model.id}
                                     colors={colors}
@@ -1003,6 +1135,13 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                     </ScrollView>
                 </Animated.View>
             </View>
+
+            <PermissionModal
+                visible={showPermissionModal}
+                isPermanentlyDenied={isPermanentlyDenied}
+                onGrant={handleGrantPermission}
+                onCancel={handleCancelPermission}
+            />
         </Modal>
     );
 };
