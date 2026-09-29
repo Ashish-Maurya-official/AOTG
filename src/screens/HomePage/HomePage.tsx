@@ -60,7 +60,7 @@ import ShareIcon from '../../static/images/SVG/ShareIcon';
 import EditIcon from '../../static/images/SVG/EditIcon';
 import Clipboard from '@react-native-clipboard/clipboard';
 import KeyEvent from 'react-native-keyevent';
-import { MenuIcon, ChevronDownIcon, RobotIcon, PlusIcon, StopIcon, CloseIcon, FileIcon } from '../../components/SharedIcons';
+import { MenuIcon, ChevronDownIcon, RobotIcon, PlusIcon, StopIcon, CloseIcon, FileIcon, ThinkingIcon } from '../../components/SharedIcons';
 
 const { width, height: windowHeight } = Dimensions.get('window');
 
@@ -138,6 +138,7 @@ interface ChatMessageItemProps {
     onRegenerate: (id: string) => void;
     onEdit: (id: string, text: string) => void;
     onImagePress: (uri: string) => void;
+    showThinking?: boolean;
 }
 
 const ChatMessageItem = memo(({
@@ -151,6 +152,7 @@ const ChatMessageItem = memo(({
     onRegenerate,
     onEdit,
     onImagePress,
+    showThinking,
 }: ChatMessageItemProps) => {
     const isCopied = copiedMessageId === msg.id;
 
@@ -172,7 +174,7 @@ const ChatMessageItem = memo(({
                     </View>
                 )}
                 {msg.role === 'assistant' ? (
-                    <MessageRenderer content={msg.text} />
+                    <MessageRenderer content={msg.text} showThinking={showThinking} />
                 ) : (
                     <View>
                         {msg.attachment && (
@@ -273,6 +275,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
     const [isPlusMenuVisible, setIsPlusMenuVisible] = useState(false);
+    const [useThinking, setUseThinking] = useState(false);
     const [showStopButton, setShowStopButton] = useState(false);
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
     const [isMultiline, setIsMultiline] = useState(false);
@@ -536,7 +539,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const handlePickFile = useCallback(async (isImage: boolean) => {
         setIsPlusMenuVisible(false);
         try {
-            const type = isImage 
+            const type = isImage
                 ? [DocumentPickerTypes.images]
                 : [
                     DocumentPickerTypes.pdf,
@@ -651,6 +654,30 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     id: assistantMsgId,
                     role: 'assistant',
                     text: `"${selectedModel.name}" is an embedding model used for feature extraction, not a conversational assistant. It does not support standard chat.`,
+                },
+            ]);
+            return;
+        }
+
+        if (selectedModel.isASR || selectedModel.isOCR) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" is an Audio/Image recognition model, not a conversational language model. It cannot be used for chat.`,
+                },
+            ]);
+            return;
+        }
+
+        if (selectedModel.isExperimental) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" uses an experimental multi-prefill architecture which is not currently supported by the stable on-device engine.`,
                 },
             ]);
             return;
@@ -775,14 +802,19 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
             let response: string;
 
+            let queryForModel = query;
+            if (selectedModel.supportsThinking && !useThinking) {
+                queryForModel = `[System Instruction: Provide a direct response without any internal reasoning or <think> tags]\n\n${query}`;
+            }
+
             if (isImageAttachment && modelSupportsVision && attachment) {
                 // Vision path: send image + text together
                 const imagePath = attachment.uri.replace('file://', '');
-                response = await generateWithVision(query || 'Describe this image.', imagePath);
+                response = await generateWithVision(queryForModel || 'Describe this image.', imagePath);
             } else if (isAudioAttachment && modelSupportsAudio && attachment) {
                 // Audio path: send audio + text together
                 const audioPath = attachment.uri.replace('file://', '');
-                response = await generateWithAudio(query || 'Describe this audio.', audioPath);
+                response = await generateWithAudio(queryForModel || 'Describe this audio.', audioPath);
             } else if (attachment && !isImageAttachment && !isAudioAttachment) {
                 // Document processing path
                 setIsProcessingDocument(true);
@@ -807,11 +839,11 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     const maxTokens = 2000; // Leave room for response
                     const relevantContext = documentService.getRelevantContext(query, docResult.text, maxTokens);
 
-                    let finalPrompt = query;
+                    let finalPrompt = queryForModel;
                     if (relevantContext) {
-                        finalPrompt = `[Document Context from ${attachment.name}]\n${relevantContext}\n\nUser Question: ${query || 'Summarize the document.'}`;
+                        finalPrompt = `[Document Context from ${attachment.name}]\n${relevantContext}\n\nUser Question: ${queryForModel || 'Summarize the document.'}`;
                     } else {
-                        finalPrompt = query || `[Attached file: ${attachment.name} - could not extract text]`;
+                        finalPrompt = queryForModel || `[Attached file: ${attachment.name} - could not extract text]`;
                     }
 
                     response = await generate(finalPrompt);
@@ -824,7 +856,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 }
             } else {
                 // Text-only path (existing flow)
-                response = await generate(query);
+                response = await generate(queryForModel);
             }
 
             setMessages((prev) => [
@@ -1078,6 +1110,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         onRegenerate={handleRegenerateMessage}
                                         onEdit={handleEditMessage}
                                         onImagePress={setFullscreenImage}
+                                        showThinking={useThinking}
                                     />
                                 ))}
 
@@ -1101,10 +1134,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                                 Generating with {selectedModel.name}...
                                             </Text>
                                         </View>
-                                        {selectedModel.supportsThinking && !streamedText && (
+                                        {selectedModel.supportsThinking && useThinking && !streamedText && (
                                             <Text style={{ color: colors.primary, fontStyle: 'italic', marginBottom: 8 }}>Thinking deeply...</Text>
                                         )}
-                                        <MessageRenderer content={streamedText || (selectedModel.supportsThinking ? '' : 'Thinking...')} />
+                                        <MessageRenderer content={streamedText || (selectedModel.supportsThinking && useThinking ? '' : 'Thinking...')} showThinking={useThinking} />
                                         <Text style={{ color: colors.text, fontSize: 15, marginTop: 4 }}> ▋</Text>
                                     </View>
                                 )}
@@ -1286,6 +1319,33 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         }),
                                     },
                                 ]}>
+                                {selectedModel?.supportsThinking && (
+                                    <>
+                                        <Reanimated.View entering={ZoomIn.delay(75).duration(200)} exiting={ZoomOut.duration(150)}>
+                                            <Pressable
+                                                style={({ pressed }) => [
+                                                    styles.plusMenuItem,
+                                                    {
+                                                        backgroundColor: pressed ? colors.border : (isDark ? colors.background : '#FFF'),
+                                                        transform: [{ scale: pressed ? 0.96 : 1 }]
+                                                    }
+                                                ]}
+                                                onPress={() => {
+                                                    setUseThinking(!useThinking);
+                                                    handleClosePlusMenu();
+                                                }}>
+                                                <ThinkingIcon size={24} color={useThinking ? colors.primary : colors.text} />
+                                                <Text style={[styles.plusMenuItemText, { color: useThinking ? colors.primary : colors.text }]}>
+                                                    Thinking: {useThinking ? 'On' : 'Off'}
+                                                </Text>
+                                            </Pressable>
+                                        </Reanimated.View>
+
+                                        <Reanimated.View entering={FadeIn.delay(100).duration(200)} exiting={FadeOut.duration(150)}>
+                                            <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />
+                                        </Reanimated.View>
+                                    </>
+                                )}
                                 <Reanimated.View entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(150)}>
                                     <Pressable
                                         style={({ pressed }) => [

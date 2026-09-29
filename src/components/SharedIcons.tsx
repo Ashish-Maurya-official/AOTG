@@ -131,6 +131,13 @@ export const PlayIcon = memo(({color}: {color: string}) => (
     <View style={[styles.playTriangle, {borderLeftColor: color}]} />
 ));
 
+export const ThinkingIcon = memo(({ color, size = 24 }: { color: string; size?: number }) => (
+    <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ width: size * 0.7, height: size * 0.7, borderRadius: size * 0.35, borderWidth: 2, borderColor: color, borderStyle: 'dashed' }} />
+        <View style={{ position: 'absolute', width: size * 0.3, height: size * 0.3, borderRadius: size * 0.15, backgroundColor: color }} />
+    </View>
+));
+
 
 const styles = StyleSheet.create({
     // Menu Icon

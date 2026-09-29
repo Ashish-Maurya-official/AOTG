@@ -1,5 +1,5 @@
 export type BlockType = 'text' | 'code' | 'terminal' | 'table'
-                      | 'json' | 'blockquote' | 'horizontalRule';
+                      | 'json' | 'blockquote' | 'horizontalRule' | 'think';
 
 export interface MessageBlock {
     id: string;
@@ -130,15 +130,33 @@ export const parseMessage = (text: string): MessageBlock[] => {
     const blocks: MessageBlock[] = [];
     if (!text) return blocks;
 
-    // Split by code blocks. Captures the entire code block including backticks.
-    // Handles incomplete code blocks (e.g. streaming) by matching until end of string if closing backticks are missing.
-    const codeBlockRegex = /(```[\s\S]*?(?:```|$))/g;
-    const parts = text.split(codeBlockRegex);
+    // Split by <think> blocks first. Captures the entire think block including tags.
+    // Handles incomplete think blocks by matching until end of string if closing tags are missing.
+    const thinkBlockRegex = /(<think>[\s\S]*?(?:<\/think>|$))/g;
+    const initialParts = text.split(thinkBlockRegex);
 
     const counter = { value: 0 };
 
-    parts.forEach((part) => {
-        if (!part) return;
+    initialParts.forEach((initialPart) => {
+        if (!initialPart) return;
+
+        if (initialPart.startsWith('<think>')) {
+            const inner = initialPart.replace(/^<think>/, '').replace(/<\/think>$/, '').trim();
+            blocks.push({
+                id: `block-${counter.value++}`,
+                type: 'think',
+                content: inner,
+            });
+            return;
+        }
+
+        // Split by code blocks. Captures the entire code block including backticks.
+        // Handles incomplete code blocks (e.g. streaming) by matching until end of string if closing backticks are missing.
+        const codeBlockRegex = /(```[\s\S]*?(?:```|$))/g;
+        const parts = initialPart.split(codeBlockRegex);
+
+        parts.forEach((part) => {
+            if (!part) return;
 
         if (part.startsWith('```')) {
             // Extract language and content
@@ -188,6 +206,7 @@ export const parseMessage = (text: string): MessageBlock[] => {
                 }
             });
         }
+        });
     });
 
     return blocks;

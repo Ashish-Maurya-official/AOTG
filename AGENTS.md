@@ -444,3 +444,10 @@ Before finishing any task, verify:
 - [ ] I reviewed the final diff.
 - [ ] I removed temporary/debug code.
 - [ ] The requested task is fully completed, not partially completed.
+
+## 31. Git Commits and Version Control
+
+- **NEVER** commit or push changes to git automatically without first asking the user for explicit permission.
+- Always show the user a summary of the changes and the proposed commit message.
+- Only execute `git commit` and `git push` after the user has replied with explicit approval to proceed.
+

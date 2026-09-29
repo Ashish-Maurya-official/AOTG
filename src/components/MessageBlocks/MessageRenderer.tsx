@@ -8,12 +8,14 @@ import TableBlock from './TableBlock';
 import TextBlock from './TextBlock';
 import JsonBlock from './JsonBlock';
 import BlockquoteBlock from './BlockquoteBlock';
+import ThinkBlock from './ThinkBlock';
 
 interface MessageRendererProps {
     content: string;
+    showThinking?: boolean;
 }
 
-const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => {
+const MessageRenderer: React.FC<MessageRendererProps> = ({ content, showThinking = true }) => {
     const { colors } = useTheme();
     // Memoize the parsed blocks so we don't re-parse on every render
     // unless the content changes (useful for streaming).
@@ -40,6 +42,9 @@ const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => {
                                 style={[styles.horizontalRule, { backgroundColor: colors.border }]}
                             />
                         );
+                    case 'think':
+                        if (!showThinking) return null;
+                        return <ThinkBlock key={block.id} content={block.content} />;
                     case 'text':
                     default:
                         // Only render non-empty text blocks
