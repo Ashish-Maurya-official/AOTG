@@ -644,6 +644,30 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
         setMessages((prev) => [...prev, userMessage]);
 
+        if (selectedModel.isEmbedding) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" is an embedding model used for feature extraction, not a conversational assistant. It does not support standard chat.`,
+                },
+            ]);
+            return;
+        }
+
+        if (selectedModel.isDraftModel) {
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: `"${selectedModel.name}" is a draft model designed for speculative decoding and is not intended for standalone conversational chat.`,
+                },
+            ]);
+            return;
+        }
+
         // Check attachment type
         const isImageAttachment = attachment && SUPPORTED_IMAGE_TYPES.includes(attachment.type.toLowerCase());
         const isAudioAttachment = attachment && SUPPORTED_AUDIO_TYPES.includes(attachment.type.toLowerCase());
@@ -705,7 +729,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             isAutoLoadingRef.current = true;
             dispatch(startLoadingModel(selectedModel.id));
             try {
-                const result = await loadModel(selectedModel.fileName, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision);
+                const result = await loadModel(selectedModel.fileName, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength);
                 dispatch(
                     setLoadedModel({
                         modelId: selectedModel.id,
@@ -1077,7 +1101,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                                 Generating with {selectedModel.name}...
                                             </Text>
                                         </View>
-                                        <MessageRenderer content={streamedText || 'Thinking...'} />
+                                        {selectedModel.supportsThinking && !streamedText && (
+                                            <Text style={{ color: colors.primary, fontStyle: 'italic', marginBottom: 8 }}>Thinking deeply...</Text>
+                                        )}
+                                        <MessageRenderer content={streamedText || (selectedModel.supportsThinking ? '' : 'Thinking...')} />
                                         <Text style={{ color: colors.text, fontSize: 15, marginTop: 4 }}> ▋</Text>
                                     </View>
                                 )}

@@ -215,6 +215,34 @@ const ModelItem = memo(
                                 </Text>
                             </View>
                         )}
+                        {model.isCoder && model.badge !== 'Coder' && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#3b82f640' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Coder
+                                </Text>
+                            </View>
+                        )}
+                        {model.supportsThinking && model.badge !== 'Reasoning' && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#f59e0b40' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Reasoning
+                                </Text>
+                            </View>
+                        )}
+                        {model.isEmbedding && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#8b5cf640' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Embedding
+                                </Text>
+                            </View>
+                        )}
+                        {model.isDraftModel && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#ef444440' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Draft
+                                </Text>
+                            </View>
+                        )}
                     </View>
 
                     <View style={styles.rightHeaderAction}>

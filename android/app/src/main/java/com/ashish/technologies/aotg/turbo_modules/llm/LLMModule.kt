@@ -469,7 +469,7 @@ class LLMModule(
      * load request while one is in flight is rejected with ERR_BUSY instead of
      * racing the native runtime.
      */
-    override fun initialize(modelPath: String, backend: String, isVision: Boolean, promise: Promise) {
+    override fun initialize(modelPath: String, backend: String, isVision: Boolean, maxContextLength: Double, promise: Promise) {
         if (!isInitializing.compareAndSet(false, true)) {
             promise.reject("ERR_BUSY", "A model is already being loaded. Please wait for it to finish.")
             return
@@ -518,7 +518,7 @@ class LLMModule(
                                 modelPath = file.absolutePath,
                                 backend = createBackend(targetBackend),
                                 visionBackend = if (isVision) createBackend(targetBackend) else null,
-                                maxNumTokens = MAX_NUM_TOKENS,
+                                maxNumTokens = maxContextLength.toInt(),
                                 maxNumImages = if (isVision) 1 else null
                             )
                             eng = Engine(config)

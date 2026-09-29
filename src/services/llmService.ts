@@ -168,7 +168,8 @@ class LLMServiceImpl {
     modelPath: string,
     backend: BackendType = 'AUTO',
     supportedBackends: BackendType[] = ['CPU', 'GPU'],
-    isVision: boolean = false
+    isVision: boolean = false,
+    maxContextLength: number = 4096
   ): Promise<InitializeResult> {
     try {
       // Determine the fallback chain based on user preference and model capabilities.
@@ -203,7 +204,7 @@ class LLMServiceImpl {
 
       const backendStr = Array.from(chainSet).join(',');
       
-      const result = await NativeLLM.initialize(modelPath, backendStr, isVision);
+      const result = await NativeLLM.initialize(modelPath, backendStr, isVision, maxContextLength);
       
       return {
         ...result,
