@@ -162,6 +162,17 @@ class LLMServiceImpl {
   }
 
   /**
+   * Check if an arbitrary file exists on disk (for validating external model paths).
+   */
+  public async checkFileExists(path: string): Promise<boolean> {
+    try {
+      return await NativeLLM.checkFileExists(path);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Load and initialize on-device LLM model weights with dynamic backend fallback
    */
   public async initialize(

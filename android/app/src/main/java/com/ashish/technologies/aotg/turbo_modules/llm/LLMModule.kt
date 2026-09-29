@@ -243,6 +243,19 @@ class LLMModule(
     }
 
     /**
+     * Check if an arbitrary file exists on disk (for validating external model paths).
+     */
+    override fun checkFileExists(path: String, promise: Promise) {
+        try {
+            val cleanPath = path.removePrefix("file://").removePrefix("content://")
+            val file = File(cleanPath)
+            promise.resolve(file.exists() && file.length() > 0)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    /**
      * Delete a downloaded model file from local storage.
      * If the file backs the currently loaded engine, the engine is unloaded first
      * (serialized with any other lifecycle operation) so we never delete a

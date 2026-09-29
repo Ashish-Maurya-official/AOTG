@@ -27,6 +27,7 @@ export interface Spec extends TurboModule {
   downloadModel(modelId: string, url: string, fileName: string): Promise<string>;
   cancelDownload(modelId: string): Promise<boolean>;
   checkModelStatus(fileName: string): Promise<ModelStatusResult>;
+  checkFileExists(path: string): Promise<boolean>;
   deleteDownloadedModel(fileName: string): Promise<boolean>;
   getModelsDirectory(): Promise<string>;
 

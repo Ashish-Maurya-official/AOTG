@@ -41,6 +41,7 @@ export interface ModelState {
   bytesDownloaded?: number;
   totalBytes?: number;
   localPath?: string;
+  externalPath?: string;
   error?: string | null;
 }
 
@@ -2225,6 +2226,7 @@ interface LLMState {
   activeBackend: string | null;
   modelStatuses: Record<string, ModelState>;
   isGenerating: boolean;
+  customModels: ModelInfo[];
 }
 
 const initialModelStatuses: Record<string, ModelState> = AVAILABLE_MODELS.reduce(
@@ -2249,6 +2251,7 @@ const initialState: LLMState = {
   activeBackend: null,
   modelStatuses: initialModelStatuses,
   isGenerating: false,
+  customModels: [],
 };
 
 const llmSlice = createSlice({
@@ -2409,6 +2412,44 @@ const llmSlice = createSlice({
     setIsGenerating: (state, action: PayloadAction<boolean>) => {
       state.isGenerating = action.payload;
     },
+    setExternalPath: (
+      state,
+      action: PayloadAction<{ modelId: string; externalPath: string }>
+    ) => {
+      const { modelId, externalPath } = action.payload;
+      if (state.modelStatuses[modelId]) {
+        state.modelStatuses[modelId].externalPath = externalPath;
+      }
+    },
+    clearExternalPath: (state, action: PayloadAction<string>) => {
+      const modelId = action.payload;
+      if (state.modelStatuses[modelId]) {
+        state.modelStatuses[modelId].externalPath = undefined;
+      }
+    },
+    addCustomModel: (state, action: PayloadAction<ModelInfo>) => {
+      const model = action.payload;
+      if (!state.customModels.some(m => m.id === model.id)) {
+        state.customModels.push(model);
+      }
+      state.modelStatuses[model.id] = {
+        status: 'downloaded',
+        progress: 100,
+        error: null,
+      };
+    },
+    removeCustomModel: (state, action: PayloadAction<string>) => {
+      const modelId = action.payload;
+      state.customModels = state.customModels.filter(m => m.id !== modelId);
+      delete state.modelStatuses[modelId];
+      if (state.loadedModelId === modelId) {
+        state.loadedModelId = null;
+        state.activeBackend = null;
+      }
+      if (state.selectedModelId === modelId) {
+        state.selectedModelId = 'gemma-4-e2b';
+      }
+    },
   },
 });
 
@@ -2427,6 +2468,10 @@ export const {
   deleteModel,
   unloadModel,
   setIsGenerating,
+  setExternalPath,
+  clearExternalPath,
+  addCustomModel,
+  removeCustomModel,
 } = llmSlice.actions;
 
 export default llmSlice.reducer;

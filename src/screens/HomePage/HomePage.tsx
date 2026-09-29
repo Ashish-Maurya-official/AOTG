@@ -266,6 +266,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const preferredBackend = useSelector(
         (state: RootState) => state.llm.preferredBackend
     );
+    const customModels = useSelector(
+        (state: RootState) => state.llm.customModels
+    );
     const currentStatus =
         modelStatuses[selectedModelId]?.status || 'not_downloaded';
 
@@ -307,11 +310,16 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         loadModel,
     } = useLLM();
 
+    const allModels = useMemo(
+        () => [...AVAILABLE_MODELS, ...customModels],
+        [customModels]
+    );
+
     const selectedModel = useMemo(
         () =>
-            AVAILABLE_MODELS.find((m) => m.id === selectedModelId) ||
+            allModels.find((m) => m.id === selectedModelId) ||
             AVAILABLE_MODELS[0],
-        [selectedModelId]
+        [selectedModelId, allModels]
     );
 
     // Stable refs for handlers used inside the key listener so the
