@@ -469,7 +469,7 @@ class LLMModule(
      * load request while one is in flight is rejected with ERR_BUSY instead of
      * racing the native runtime.
      */
-    override fun initialize(modelPath: String, backend: String, promise: Promise) {
+    override fun initialize(modelPath: String, backend: String, isVision: Boolean, promise: Promise) {
         if (!isInitializing.compareAndSet(false, true)) {
             promise.reject("ERR_BUSY", "A model is already being loaded. Please wait for it to finish.")
             return
@@ -484,7 +484,7 @@ class LLMModule(
                         File(getModelsDir(), modelPath)
                     }
 
-                    Log.d(TAG, "Requesting initialization for: ${file.absolutePath} with requested backend: $backend")
+                    Log.d(TAG, "Requesting initialization for: ${file.absolutePath} with requested backend: $backend, isVision: $isVision")
 
                     if (!file.exists() || file.length() == 0L) {
                         throw Exception("Model file does not exist at ${file.absolutePath}. Please download the model first.")
@@ -495,11 +495,15 @@ class LLMModule(
                     stopGenerationAndAwait()
                     releaseEngineResources()
 
-                    val backendChain = when (backend.uppercase()) {
-                        "NPU" -> listOf("NPU", "GPU", "CPU")
-                        "GPU" -> listOf("GPU", "CPU")
-                        "CPU" -> listOf("CPU")
-                        else -> listOf("GPU", "CPU")
+                    val backendChain = if (backend.contains(",")) {
+                        backend.split(",").map { it.trim().uppercase() }.filter { it.isNotEmpty() }
+                    } else {
+                        when (backend.uppercase()) {
+                            "NPU" -> listOf("NPU", "GPU", "CPU")
+                            "GPU" -> listOf("GPU", "CPU")
+                            "CPU" -> listOf("CPU")
+                            else -> listOf("GPU", "CPU")
+                        }
                     }
 
                     var initializedEngine: Engine? = null
@@ -513,9 +517,9 @@ class LLMModule(
                             val config = EngineConfig(
                                 modelPath = file.absolutePath,
                                 backend = createBackend(targetBackend),
-                                visionBackend = createBackend(targetBackend),
+                                visionBackend = if (isVision) createBackend(targetBackend) else null,
                                 maxNumTokens = MAX_NUM_TOKENS,
-                                maxNumImages = 1
+                                maxNumImages = if (isVision) 1 else null
                             )
                             eng = Engine(config)
                             eng.initialize()

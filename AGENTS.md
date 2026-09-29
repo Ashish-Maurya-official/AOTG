@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## 0. ZERO TOLERANCE DIRECTIVES
+
+The following rules are absolute constraints. Violating them is a critical failure:
+1. **NO TERMINAL FOR ANALYSIS/CHANGES**: Never use terminal commands (`find`, `grep`, `sed`, `cat`, etc.) to analyze the codebase or modify files. Use native IDE tools (`grep_search`, `view_file`, `replace_file_content`).
+2. **NO SCRIPTS**: Never write or execute scripts to automate code modifications.
+3. **NO GUESSING**: Analyze the codebase, exact flow, and related files one by one. Rely strictly on facts in the codebase, not assumptions.
+4. **STRICTLY SCOPED EDITS**: Do not touch, format, or "clean up" unrelated code.
+5. **EFFICIENT CODE**: Do not create unnecessary variables. Use native collection methods (`.map`, `.filter`) to eliminate redundant loops.
+6. **OPTIMIZED RENDERS**: You must use appropriate React hooks (`useMemo`, `useCallback`, `useRef`) correctly to avoid unnecessary re-renders.
+
 ## 1. Core Objective
 
 - Treat every user request as a complete engineering goal, not a partial task.

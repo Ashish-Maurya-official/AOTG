@@ -162,14 +162,54 @@ class LLMServiceImpl {
   }
 
   /**
-   * Load and initialize on-device LLM model weights with NPU -> GPU -> CPU fallback
+   * Load and initialize on-device LLM model weights with dynamic backend fallback
    */
   public async initialize(
     modelPath: string,
-    backend: BackendType = 'AUTO'
+    backend: BackendType = 'AUTO',
+    supportedBackends: BackendType[] = ['CPU', 'GPU'],
+    isVision: boolean = false
   ): Promise<InitializeResult> {
     try {
-      return await NativeLLM.initialize(modelPath, backend);
+      // Determine the fallback chain based on user preference and model capabilities.
+      const chainSet = new Set<BackendType>();
+
+      if (backend === 'AUTO') {
+        // If AUTO, prefer NPU if supported, else GPU, else CPU
+        if (supportedBackends.includes('NPU')) chainSet.add('NPU');
+        if (supportedBackends.includes('GPU')) chainSet.add('GPU');
+        if (supportedBackends.includes('CPU')) chainSet.add('CPU');
+      } else {
+        // User requested a specific backend. If supported, try it first.
+        if (supportedBackends.includes(backend)) chainSet.add(backend);
+
+        // Then fallback to other supported hardware
+        if (backend === 'NPU') {
+          if (supportedBackends.includes('GPU')) chainSet.add('GPU');
+          if (supportedBackends.includes('CPU')) chainSet.add('CPU');
+        } else if (backend === 'GPU') {
+          if (supportedBackends.includes('CPU')) chainSet.add('CPU');
+        }
+      }
+
+      // If somehow the chain is empty, default to whatever it supports, or CPU.
+      if (chainSet.size === 0) {
+        if (supportedBackends.length > 0) {
+          supportedBackends.forEach((b) => chainSet.add(b));
+        } else {
+          chainSet.add('CPU');
+        }
+      }
+
+      const backendStr = Array.from(chainSet).join(',');
+      
+      const result = await NativeLLM.initialize(modelPath, backendStr, isVision);
+      
+      return {
+        ...result,
+        requestedBackend: backend,
+        wasFallback: result.actualBackend !== backend && backend !== 'AUTO'
+      };
     } catch (error) {
       console.error('[LLMService] initialize error:', error);
       throw error;

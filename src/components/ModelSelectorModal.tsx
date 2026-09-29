@@ -73,14 +73,23 @@ const BackendIcons: Record<string, React.FC<any>> = {
     CPU: CpuIcon,
 };
 
-/** Human-readable backend fallback chain — mirrors LLMModule.kt */
-const backendChainLabel = (backend: string): string => {
-    switch (backend) {
-        case 'NPU': return 'NPU → GPU → CPU';
-        case 'GPU': return 'GPU → CPU';
-        case 'CPU': return 'CPU';
-        default: return 'GPU → CPU'; // AUTO
+/** Human-readable backend fallback chain — dynamically based on model capabilities */
+const backendChainLabel = (backend: string, model: ModelInfo): string => {
+    if (backend === 'AUTO') {
+        return model.supportedBackends.join(' → ');
     }
+    const chain: string[] = [];
+    if (model.supportedBackends.includes(backend as BackendType)) {
+        chain.push(backend);
+    }
+    if (backend === 'NPU') {
+        if (model.supportedBackends.includes('GPU')) chain.push('GPU');
+        if (model.supportedBackends.includes('CPU')) chain.push('CPU');
+    } else if (backend === 'GPU') {
+        if (model.supportedBackends.includes('CPU')) chain.push('CPU');
+    }
+    if (chain.length === 0) return model.supportedBackends.join(' → ') || 'CPU';
+    return chain.join(' → ');
 };
 
 
@@ -370,7 +379,7 @@ const ModelItem = memo(
                                     styles.buttonText,
                                     { color: colors.text },
                                 ]}>
-                                Trying {backendChainLabel(preferredBackend)}...
+                                Trying {backendChainLabel(preferredBackend, model)}...
                             </Text>
                         </View>
                     )}
@@ -722,7 +731,9 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 try {
                     const result = await LLMService.initialize(
                         model.fileName,
-                        preferredBackend
+                        preferredBackend,
+                        model.supportedBackends,
+                        model.supportsVision
                     );
                     dispatch(
                         setLoadedModel({
@@ -907,7 +918,25 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                     <ScrollView
                         showsVerticalScrollIndicator={false}
                         contentContainerStyle={styles.listContent}>
-                        {AVAILABLE_MODELS.map((model) => {
+                        {AVAILABLE_MODELS.filter(
+                            (m) =>
+                                preferredBackend === 'AUTO' ||
+                                m.supportedBackends.includes(
+                                    preferredBackend as BackendType
+                                )
+                        )
+                        .sort((a, b) => {
+                            const statusA = modelStatuses[a.id]?.status || 'not_downloaded';
+                            const statusB = modelStatuses[b.id]?.status || 'not_downloaded';
+                            
+                            const isDownloadedA = statusA === 'downloaded' || statusA === 'loading' || statusA === 'loaded';
+                            const isDownloadedB = statusB === 'downloaded' || statusB === 'loading' || statusB === 'loaded';
+                            
+                            if (isDownloadedA && !isDownloadedB) return -1;
+                            if (!isDownloadedA && isDownloadedB) return 1;
+                            return 0;
+                        })
+                        .map((model) => {
                             const modelState: ModelState = modelStatuses[
                                 model.id
                             ] || {

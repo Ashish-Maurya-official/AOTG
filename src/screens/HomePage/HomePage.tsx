@@ -705,7 +705,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             isAutoLoadingRef.current = true;
             dispatch(startLoadingModel(selectedModel.id));
             try {
-                const result = await loadModel(selectedModel.fileName, preferredBackend);
+                const result = await loadModel(selectedModel.fileName, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision);
                 dispatch(
                     setLoadedModel({
                         modelId: selectedModel.id,

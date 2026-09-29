@@ -11,7 +11,7 @@ export interface UseLLMReturn {
   activeBackend: string | null;
   streamedText: string;
   error: string | null;
-  loadModel: (modelPath: string, backend?: BackendType) => Promise<InitializeResult>;
+  loadModel: (modelPath: string, backend?: BackendType, supportedBackends?: BackendType[], isVision?: boolean) => Promise<InitializeResult>;
   generate: (prompt: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithVision: (prompt: string, imagePath: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithAudio: (prompt: string, audioPath: string, onToken?: (token: string) => void) => Promise<string>;
@@ -46,10 +46,15 @@ export const useLLM = (): UseLLMReturn => {
   }, []);
 
   const loadModel = useCallback(
-    async (modelPath: string, backend: BackendType = 'AUTO'): Promise<InitializeResult> => {
+    async (
+      modelPath: string,
+      backend: BackendType = 'AUTO',
+      supportedBackends: BackendType[] = ['CPU', 'GPU'],
+      isVision: boolean = false
+    ): Promise<InitializeResult> => {
       setError(null);
       try {
-        const result = await LLMService.initialize(modelPath, backend);
+        const result = await LLMService.initialize(modelPath, backend, supportedBackends, isVision);
         setIsLoaded(result.success);
         setActiveBackend(result.actualBackend);
         return result;
