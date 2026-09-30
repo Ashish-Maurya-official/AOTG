@@ -261,16 +261,21 @@ class LLMModule(
      * (serialized with any other lifecycle operation) so we never delete a
      * memory-mapped file under a live engine.
      */
-    override fun deleteDownloadedModel(fileName: String, promise: Promise) {
+    override fun deleteDownloadedModel(pathOrName: String, promise: Promise) {
         coroutineScope.launch {
             try {
                 lifecycleMutex.withLock {
-                    if (currentModelPath?.endsWith(fileName) == true) {
+                    if (currentModelPath?.endsWith(pathOrName) == true || currentModelPath == pathOrName) {
                         stopGenerationAndAwait()
                         releaseEngineResources()
                     }
 
-                    val file = File(getModelsDir(), fileName)
+                    val file = if (pathOrName.startsWith("/") || pathOrName.startsWith("file:")) {
+                        File(pathOrName.removePrefix("file://"))
+                    } else {
+                        File(getModelsDir(), pathOrName)
+                    }
+
                     if (file.exists()) {
                         promise.resolve(file.delete())
                     } else {
@@ -279,6 +284,72 @@ class LLMModule(
                 }
             } catch (e: Exception) {
                 promise.reject("ERR_DELETE_MODEL", e.message, e)
+            }
+        }
+    }
+
+    /**
+     * Import a model file from a content:// URI directly into the models directory.
+     * Uses ContentResolver streaming to handle multi-GB files without OOM.
+     * Returns the absolute path of the resulting file.
+     */
+    override fun importModelFile(contentUri: String, fileName: String, promise: Promise) {
+        coroutineScope.launch {
+            try {
+                val uri = android.net.Uri.parse(contentUri)
+                
+                // Attempt to resolve the real absolute path without copying
+                val realPath = UriUtils.getPath(reactContext, uri)
+                if (realPath != null) {
+                    val file = File(realPath)
+                    if (file.exists() && file.canRead()) {
+                        Log.i(TAG, "Resolved real path for URI: $realPath")
+                        promise.resolve(realPath)
+                        return@launch
+                    }
+                }
+
+                // If we couldn't resolve a readable path, we must copy it to our models dir
+                Log.w(TAG, "Could not resolve real path for URI, falling back to copy: $contentUri")
+                val targetFile = File(getModelsDir(), fileName)
+
+                if (targetFile.exists() && targetFile.length() > 0) {
+                    promise.resolve(targetFile.absolutePath)
+                    return@launch
+                }
+
+                val tempFile = File(getModelsDir(), "$fileName.importing")
+
+                val contentResolver = reactContext.contentResolver
+                val inputStream = contentResolver.openInputStream(uri)
+                    ?: throw Exception("Cannot read the selected file. The file picker permission may have expired.")
+
+                inputStream.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        val buffer = ByteArray(8192)
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                        }
+                        output.flush()
+                    }
+                }
+
+                if (tempFile.length() == 0L) {
+                    tempFile.delete()
+                    throw Exception("Import resulted in an empty file. The source file may be corrupted.")
+                }
+
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.delete()
+                    throw Exception("Could not finalize the imported file.")
+                }
+
+                Log.i(TAG, "Model imported (copied): ${targetFile.absolutePath} (${targetFile.length()} bytes)")
+                promise.resolve(targetFile.absolutePath)
+            } catch (e: Exception) {
+                Log.e(TAG, "importModelFile failed: ${e.message}", e)
+                promise.reject("ERR_IMPORT_MODEL", e.message ?: "Import failed", e)
             }
         }
     }

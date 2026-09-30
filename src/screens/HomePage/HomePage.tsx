@@ -39,11 +39,21 @@ import {
     setLoadedModel,
     setModelLoadFailed,
     syncModelStatus,
+    setExternalPath,
+    clearExternalPath,
+    addCustomModel,
+    removeCustomModel,
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import useLLM from '../../hooks/useLLM';
 import LLMService, { estimateTokens } from '../../services/llmService';
 import documentService from '../../services/documentService';
+import {
+    loadExternalModelPaths,
+    removeExternalModelPath,
+    loadCustomModels,
+    removeCustomModelStorage,
+} from '../../services/modelStorageService';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
@@ -390,19 +400,67 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     useEffect(() => {
         let cancelled = false;
         (async () => {
+            // 1. Restore custom models from persistence
+            const persistedCustomModels = await loadCustomModels();
+            if (cancelled) return;
+            persistedCustomModels.forEach(cm => {
+                dispatch(addCustomModel(cm));
+            });
+
+            // 2. Load persisted external paths
+            const externalPaths = await loadExternalModelPaths();
+            if (cancelled) return;
+
+            // 3. Sync catalog models
             for (const model of AVAILABLE_MODELS) {
-                try {
+                if (cancelled) return;
+                const externalPath = externalPaths[model.id];
+                if (externalPath) {
+                    const exists = await LLMService.checkFileExists(externalPath);
+                    if (exists) {
+                        dispatch(syncModelStatus({ modelId: model.id, isDownloaded: true, localPath: externalPath }));
+                        dispatch(setExternalPath({ modelId: model.id, externalPath }));
+                    } else {
+                        await removeExternalModelPath(model.id);
+                        dispatch(clearExternalPath(model.id));
+                        const check = await LLMService.checkModelStatus(model.fileName);
+                        dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
+                    }
+                } else {
                     const check = await LLMService.checkModelStatus(model.fileName);
-                    if (cancelled) return;
-                    dispatch(
-                        syncModelStatus({
-                            modelId: model.id,
-                            isDownloaded: check.isDownloaded,
-                            localPath: check.localPath,
-                        })
-                    );
-                } catch (_) {
-                    // Non-fatal — the model selector re-syncs when opened.
+                    dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
+                }
+            }
+
+            // 4. Sync custom models
+            for (const cm of persistedCustomModels) {
+                if (cancelled) return;
+                const externalPath = externalPaths[cm.id];
+                if (externalPath) {
+                    const exists = await LLMService.checkFileExists(externalPath);
+                    if (exists) {
+                        dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: externalPath }));
+                        dispatch(setExternalPath({ modelId: cm.id, externalPath }));
+                    } else {
+                        await removeExternalModelPath(cm.id);
+                        // External file gone — check if it exists in models/ dir
+                        const check = await LLMService.checkModelStatus(cm.fileName);
+                        if (check.isDownloaded) {
+                            dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                        } else {
+                            await removeCustomModelStorage(cm.id);
+                            dispatch(removeCustomModel(cm.id));
+                        }
+                    }
+                } else {
+                    // No external path — check the standard models directory
+                    const check = await LLMService.checkModelStatus(cm.fileName);
+                    if (check.isDownloaded) {
+                        dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                    } else {
+                        await removeCustomModelStorage(cm.id);
+                        dispatch(removeCustomModel(cm.id));
+                    }
                 }
             }
         })();
@@ -764,7 +822,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             isAutoLoadingRef.current = true;
             dispatch(startLoadingModel(selectedModel.id));
             try {
-                const result = await loadModel(selectedModel.fileName, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength);
+                const modelPath = modelStatuses[selectedModel.id]?.localPath || selectedModel.fileName;
+                const result = await loadModel(modelPath, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength);
                 dispatch(
                     setLoadedModel({
                         modelId: selectedModel.id,

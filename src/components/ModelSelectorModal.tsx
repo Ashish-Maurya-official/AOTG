@@ -15,7 +15,7 @@ import {
     Linking,
     PermissionsAndroid,
 } from 'react-native';
-import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, saveDocuments, keepLocalCopy } from '@react-native-documents/picker';
+import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, saveDocuments } from '@react-native-documents/picker';
 import { useSelector, useDispatch } from 'react-redux';
 import { useTheme } from '../theme/ThemeProvider';
 import { RootState } from '../store/store';
@@ -706,8 +706,22 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: externalPath }));
                         dispatch(setExternalPath({ modelId: cm.id, externalPath }));
                     } else {
-                        // Custom model file deleted externally — remove the custom model
                         await removeExternalModelPath(cm.id);
+                        // External file gone — check if it exists in models/ dir
+                        const check = await LLMService.checkModelStatus(cm.fileName);
+                        if (check.isDownloaded) {
+                            dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                        } else {
+                            await removeCustomModelStorage(cm.id);
+                            dispatch(removeCustomModel(cm.id));
+                        }
+                    }
+                } else {
+                    // No external path — check the standard models directory
+                    const check = await LLMService.checkModelStatus(cm.fileName);
+                    if (check.isDownloaded) {
+                        dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                    } else {
                         await removeCustomModelStorage(cm.id);
                         dispatch(removeCustomModel(cm.id));
                     }
@@ -856,28 +870,19 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                     return;
                 }
 
-                // Use keepLocalCopy to convert the content:// URI to a local file:// URI
-                const copyResult = await keepLocalCopy({
-                    files: [{ uri: pickedFile.uri, fileName: fileName }],
-                    destination: 'documentDirectory'
-                });
-
-                if (copyResult[0].status === 'error') {
-                    Alert.alert('Import Failed', 'Could not save a local copy of the model file.');
-                    return;
-                }
-
-                const localPath = copyResult[0].localUri.replace('file://', '');
+                // Use the native importModelFile method which tries to resolve the absolute path 
+                // of the content:// URI. If it can't, it streams it to the models directory.
+                const localPath = await LLMService.importModelFile(pickedFile.uri, fileName);
 
                 if (matchedModel) {
                     // Catalog model — set as downloaded with the imported path
                     dispatch(setDownloaded({ modelId: matchedModel.id, localPath }));
+                    // Always save it as an external path so it can be restored on reboot
                     dispatch(setExternalPath({ modelId: matchedModel.id, externalPath: localPath }));
                     await saveExternalModelPath(matchedModel.id, localPath);
                     Alert.alert('Model Imported', `${matchedModel.name} has been imported and is ready to load!`);
                 } else {
                     // Unknown model — create a custom model entry
-                    const customId = `custom-${fileName.replace(/\.litertlm$/, '').replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase()}`;
                     const displayName = fileName.replace(/\.litertlm$/, '').replace(/[_-]/g, ' ');
                     const customModel: ModelInfo = {
                         id: customId,
@@ -902,19 +907,22 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                     };
                     dispatch(addCustomModel(customModel));
                     dispatch(setDownloaded({ modelId: customId, localPath }));
+                    // Always save it as an external path so it can be restored on reboot
                     dispatch(setExternalPath({ modelId: customId, externalPath: localPath }));
-                    await saveCustomModel(customModel);
                     await saveExternalModelPath(customId, localPath);
+                    await saveCustomModel(customModel);
                     Alert.alert('Model Imported', `"${displayName}" has been imported as a custom model and is ready to load!`);
                 }
             } catch (err: any) {
                 if (isErrorWithCode(err) && (err.code === errorCodes.IN_PROGRESS || err.code === errorCodes.OPERATION_CANCELED)) {
                     return;
                 }
-                Alert.alert('Import Failed', 'Could not import the model file.');
+                console.error('[ModelSelector] Import error:', err);
+                const message = err?.message || 'Could not import the model file.';
+                Alert.alert('Import Failed', message);
             }
         },
-        [dispatch]
+        [dispatch, customModels, modelStatuses]
     );
 
     // Export Model Handler — copies model to user's chosen location for backup/sharing
@@ -984,7 +992,9 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                     }
                                 }
                                 // Try deleting the internal copy (may not exist for external-only models)
-                                await LLMService.deleteDownloadedModel(model.fileName);
+                                const localPath = modelStatuses[model.id]?.localPath;
+                                const pathToDelete = localPath && (localPath.startsWith('/') || localPath.startsWith('file://')) ? localPath : model.fileName;
+                                await LLMService.deleteDownloadedModel(pathToDelete);
 
                                 // Clean up persistence
                                 await removeExternalModelPath(model.id);

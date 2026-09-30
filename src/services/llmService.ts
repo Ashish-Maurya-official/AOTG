@@ -145,7 +145,7 @@ class LLMServiceImpl {
   public async checkModelStatus(fileName: string): Promise<ModelStatusResult> {
     try {
       return await NativeLLM.checkModelStatus(fileName);
-    } catch (err) {
+    } catch {
       return { isDownloaded: false, localPath: '', fileSizeBytes: 0 };
     }
   }
@@ -153,10 +153,10 @@ class LLMServiceImpl {
   /**
    * Delete a downloaded model file
    */
-  public async deleteDownloadedModel(fileName: string): Promise<boolean> {
+  public async deleteDownloadedModel(pathOrName: string): Promise<boolean> {
     try {
-      return await NativeLLM.deleteDownloadedModel(fileName);
-    } catch (err) {
+      return await NativeLLM.deleteDownloadedModel(pathOrName);
+    } catch {
       return false;
     }
   }
@@ -170,6 +170,14 @@ class LLMServiceImpl {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Import a model file from a content:// URI (Android document picker) directly
+   * into the native models directory. Returns the absolute path of the copied file.
+   */
+  public async importModelFile(contentUri: string, fileName: string): Promise<string> {
+    return await NativeLLM.importModelFile(contentUri, fileName);
   }
 
   /**
@@ -475,7 +483,7 @@ class LLMServiceImpl {
   public async isModelLoaded(): Promise<boolean> {
     try {
       return await NativeLLM.isModelLoaded();
-    } catch (err) {
+    } catch {
       return false;
     }
   }
@@ -486,7 +494,7 @@ class LLMServiceImpl {
   public async isGenerating(): Promise<boolean> {
     try {
       return await NativeLLM.isGenerating();
-    } catch (err) {
+    } catch {
       return false;
     }
   }
@@ -497,7 +505,7 @@ class LLMServiceImpl {
   public async getContextUsage(): Promise<ContextUsage> {
     try {
       return await NativeLLM.getContextUsage();
-    } catch (err) {
+    } catch {
       return { tokenCount: 0, maxTokens: 0, isLoaded: false };
     }
   }
