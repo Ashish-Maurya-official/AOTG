@@ -37,6 +37,7 @@ subprojects { project ->
             if (project.hasProperty('android')) {
                 project.android {
                     compileSdkVersion rootProject.ext.compileSdkVersion
+                    namespace "com.github.kevinejohn.keyevent"
                 }
             }
         }

@@ -2245,7 +2245,7 @@ const initialModelStatuses: Record<string, ModelState> = AVAILABLE_MODELS.reduce
 );
 
 const initialState: LLMState = {
-  selectedModelId: 'gemma-4-e2b',
+  selectedModelId: 'gemma-4-e2b-it-litert-lm',
   loadedModelId: null,
   preferredBackend: 'AUTO',
   activeBackend: null,
@@ -2429,7 +2429,10 @@ const llmSlice = createSlice({
     },
     addCustomModel: (state, action: PayloadAction<ModelInfo>) => {
       const model = action.payload;
-      if (!state.customModels.some(m => m.id === model.id)) {
+      const index = state.customModels.findIndex(m => m.id === model.id);
+      if (index >= 0) {
+        state.customModels[index] = model;
+      } else {
         state.customModels.push(model);
       }
       state.modelStatuses[model.id] = {
@@ -2437,6 +2440,13 @@ const llmSlice = createSlice({
         progress: 100,
         error: null,
       };
+    },
+    updateCustomModel: (state, action: PayloadAction<ModelInfo>) => {
+      const updated = action.payload;
+      const index = state.customModels.findIndex(m => m.id === updated.id);
+      if (index !== -1) {
+        state.customModels[index] = updated;
+      }
     },
     removeCustomModel: (state, action: PayloadAction<string>) => {
       const modelId = action.payload;
@@ -2447,7 +2457,7 @@ const llmSlice = createSlice({
         state.activeBackend = null;
       }
       if (state.selectedModelId === modelId) {
-        state.selectedModelId = 'gemma-4-e2b';
+        state.selectedModelId = 'gemma-4-e2b-it-litert-lm';
       }
     },
   },
@@ -2471,6 +2481,7 @@ export const {
   setExternalPath,
   clearExternalPath,
   addCustomModel,
+  updateCustomModel,
   removeCustomModel,
 } = llmSlice.actions;
 

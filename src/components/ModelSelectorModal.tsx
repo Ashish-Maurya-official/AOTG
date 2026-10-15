@@ -31,6 +31,7 @@ import AutoIcon from '../static/images/SVG/AutoIcon';
 import LoaderIcon from '../static/images/SVG/LoaderIcon';
 import DriveIcon from '../static/images/SVG/DriveIcon';
 import ShareIcon from '../static/images/SVG/ShareIcon';
+import EditIcon from '../static/images/SVG/EditIcon';
 import useLLM from '../hooks/useLLM';
 
 import {
@@ -52,9 +53,11 @@ import {
     setExternalPath,
     clearExternalPath,
     addCustomModel,
+    updateCustomModel,
     removeCustomModel,
 } from '../store/slices/llmSlice';
 import PermissionModal from './PermissionModal';
+import CustomModelConfigModal from './CustomModelConfigModal';
 import LLMService, {
     DownloadProgressEvent,
     DownloadCompleteEvent,
@@ -68,6 +71,10 @@ import {
     saveCustomModel,
     removeCustomModelStorage,
 } from '../services/modelStorageService';
+import {
+    findMatchingCatalogModel,
+    inferModelCapabilities,
+} from '../utils/modelMatching';
 
 interface ModelSelectorModalProps {
     visible: boolean;
@@ -136,6 +143,7 @@ const ModelItem = memo(
         onDelete,
         onSelect,
         onExport,
+        onConfigure,
         preferredBackend,
         isUnloading,
         isCustomModel,
@@ -152,6 +160,7 @@ const ModelItem = memo(
         onDelete: () => void;
         onSelect: () => void;
         onExport: () => void;
+        onConfigure?: () => void;
         preferredBackend: string;
         isUnloading: boolean;
         isCustomModel: boolean;
@@ -233,6 +242,20 @@ const ModelItem = memo(
                             <View style={styles.recommendedBadge}>
                                 <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
                                     {model.badge}
+                                </Text>
+                            </View>
+                        )}
+                        {model.supportsVision && model.badge !== 'Multimodal' && model.badge !== 'Vision' && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#10b98135' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Vision
+                                </Text>
+                            </View>
+                        )}
+                        {model.supportsAudio && model.badge !== 'Multimodal' && model.badge !== 'Audio' && (
+                            <View style={[styles.recommendedBadge, { backgroundColor: '#ec489935' }]}>
+                                <Text style={[styles.recommendedBadgeText, { color: colors.text }]}>
+                                    Audio
                                 </Text>
                             </View>
                         )}
@@ -405,14 +428,20 @@ const ModelItem = memo(
                                     style={styles.deleteIconButton}>
                                     <DeleteIcon color="#FF453A" size={20} />
                                 </Pressable>
-                                {!isCustomModel && (
+                                {isCustomModel && onConfigure && (
                                     <Pressable
-                                        onPress={onExport}
+                                        onPress={onConfigure}
                                         hitSlop={8}
                                         style={styles.deleteIconButton}>
-                                        <ShareIcon color={colors.secondaryText} size={20} />
+                                        <EditIcon color={colors.text} size={18} />
                                     </Pressable>
                                 )}
+                                <Pressable
+                                    onPress={onExport}
+                                    hitSlop={8}
+                                    style={styles.deleteIconButton}>
+                                    <ShareIcon color={colors.secondaryText} size={20} />
+                                </Pressable>
                                 <Pressable
                                     onPress={onLoad}
                                     style={styles.loadButton}>
@@ -459,6 +488,15 @@ const ModelItem = memo(
                                         style={[styles.deleteIconButton, isUnloading && styles.disabledButton]}>
                                         <DeleteIcon color="#FF453A" size={20} />
                                     </Pressable>
+                                    {isCustomModel && onConfigure && (
+                                        <Pressable
+                                            onPress={onConfigure}
+                                            disabled={isUnloading}
+                                            hitSlop={8}
+                                            style={[styles.deleteIconButton, isUnloading && styles.disabledButton]}>
+                                            <EditIcon color={colors.text} size={18} />
+                                        </Pressable>
+                                    )}
                                     <Pressable
                                         onPress={onUnload}
                                         disabled={isUnloading}
@@ -664,16 +702,40 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         if (!visible) return;
 
         (async () => {
-            // 1. Restore custom models from persistence
+            // 1. Restore custom models from persistence & reconcile any matching catalog models
             const persistedCustomModels = await loadCustomModels();
-            persistedCustomModels.forEach(cm => {
-                dispatch(addCustomModel(cm));
-            });
-
-            // 2. Load persisted external paths
             const externalPaths = await loadExternalModelPaths();
 
-            // 3. Sync catalog models
+            for (const cm of persistedCustomModels) {
+                const matchedCatalog = findMatchingCatalogModel(cm.fileName) || findMatchingCatalogModel(cm.name);
+                if (matchedCatalog) {
+                    const extPath = externalPaths[cm.id];
+                    let resolvedPath = extPath;
+                    if (!resolvedPath) {
+                        const checkInternal = await LLMService.checkModelStatus(cm.fileName);
+                        if (checkInternal.isDownloaded) {
+                            resolvedPath = checkInternal.localPath;
+                        }
+                    }
+
+                    if (resolvedPath) {
+                        const exists = await LLMService.checkFileExists(resolvedPath);
+                        if (exists) {
+                            dispatch(syncModelStatus({ modelId: matchedCatalog.id, isDownloaded: true, localPath: resolvedPath }));
+                            dispatch(setExternalPath({ modelId: matchedCatalog.id, externalPath: resolvedPath }));
+                            await saveExternalModelPath(matchedCatalog.id, resolvedPath);
+                            externalPaths[matchedCatalog.id] = resolvedPath;
+                        }
+                    }
+                    await removeCustomModelStorage(cm.id);
+                    await removeExternalModelPath(cm.id);
+                    dispatch(removeCustomModel(cm.id));
+                } else {
+                    dispatch(addCustomModel(cm));
+                }
+            }
+
+            // 2. Sync catalog models
             for (const model of AVAILABLE_MODELS) {
                 const externalPath = externalPaths[model.id];
                 if (externalPath) {
@@ -687,18 +749,37 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         await removeExternalModelPath(model.id);
                         dispatch(clearExternalPath(model.id));
                         // Fall back to checking internal storage
-                        const check = await LLMService.checkModelStatus(model.fileName);
+                        let check = await LLMService.checkModelStatus(model.fileName);
+                        if (!check.isDownloaded) {
+                            const urlBasename = model.url.split('/').pop()?.split('?')[0];
+                            if (urlBasename && urlBasename !== model.fileName) {
+                                const urlCheck = await LLMService.checkModelStatus(urlBasename);
+                                if (urlCheck.isDownloaded) {
+                                    check = urlCheck;
+                                }
+                            }
+                        }
                         dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                     }
                 } else {
                     // Normal check against internal models/ dir
-                    const check = await LLMService.checkModelStatus(model.fileName);
+                    let check = await LLMService.checkModelStatus(model.fileName);
+                    if (!check.isDownloaded) {
+                        const urlBasename = model.url.split('/').pop()?.split('?')[0];
+                        if (urlBasename && urlBasename !== model.fileName) {
+                            const urlCheck = await LLMService.checkModelStatus(urlBasename);
+                            if (urlCheck.isDownloaded) {
+                                check = urlCheck;
+                            }
+                        }
+                    }
                     dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                 }
             }
 
-            // 4. Sync custom models
-            for (const cm of persistedCustomModels) {
+            // 3. Sync remaining non-catalog custom models
+            const remainingCustomModels = await loadCustomModels();
+            for (const cm of remainingCustomModels) {
                 const externalPath = externalPaths[cm.id];
                 if (externalPath) {
                     const exists = await LLMService.checkFileExists(externalPath);
@@ -707,7 +788,6 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         dispatch(setExternalPath({ modelId: cm.id, externalPath }));
                     } else {
                         await removeExternalModelPath(cm.id);
-                        // External file gone — check if it exists in models/ dir
                         const check = await LLMService.checkModelStatus(cm.fileName);
                         if (check.isDownloaded) {
                             dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
@@ -717,7 +797,6 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         }
                     }
                 } else {
-                    // No external path — check the standard models directory
                     const check = await LLMService.checkModelStatus(cm.fileName);
                     if (check.isDownloaded) {
                         dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
@@ -847,71 +926,90 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 });
                 if (!result || result.length === 0) return;
                 const pickedFile = result[0];
-                const fileName = pickedFile.name || 'imported_model.litertlm';
+                const rawFileName = pickedFile.name || 'imported_model.litertlm';
+                const fileName = rawFileName.trim();
 
-                if (!fileName.endsWith('.litertlm')) {
+                if (!fileName.toLowerCase().endsWith('.litertlm')) {
                     Alert.alert('Invalid File', 'Please select a valid .litertlm model file.');
                     return;
                 }
 
-                // Check if already imported (Custom Models)
-                const customId = `custom-${fileName.replace(/\.litertlm$/, '').replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase()}`;
-                if (customModels.some(m => m.id === customId)) {
-                    Alert.alert('Already Imported', 'This model is already in your imported models list.');
-                    return;
-                }
-
-                // Try to match against catalog
-                const matchedModel = AVAILABLE_MODELS.find(m => m.fileName === fileName);
-                
-                // Check if already downloaded/imported (Catalog Models)
-                if (matchedModel && ['downloaded', 'loaded'].includes(modelStatuses[matchedModel.id]?.status)) {
-                    Alert.alert('Already Available', 'This model is already available on your device.');
-                    return;
-                }
-
-                // Use the native importModelFile method which tries to resolve the absolute path 
-                // of the content:// URI. If it can't, it streams it to the models directory.
-                const localPath = await LLMService.importModelFile(pickedFile.uri, fileName);
+                // Try to match against catalog first using our smart matching logic
+                const matchedModel = findMatchingCatalogModel(fileName, AVAILABLE_MODELS);
 
                 if (matchedModel) {
+                    const status = modelStatuses[matchedModel.id]?.status;
+                    if (['downloaded', 'loaded'].includes(status)) {
+                        Alert.alert('Already Available', `"${matchedModel.name}" is already available on your device.`);
+                        return;
+                    }
+
+                    // Native import: resolves real absolute path or copies to models dir
+                    const localPath = await LLMService.importModelFile(pickedFile.uri, fileName);
+
                     // Catalog model — set as downloaded with the imported path
                     dispatch(setDownloaded({ modelId: matchedModel.id, localPath }));
-                    // Always save it as an external path so it can be restored on reboot
                     dispatch(setExternalPath({ modelId: matchedModel.id, externalPath: localPath }));
                     await saveExternalModelPath(matchedModel.id, localPath);
-                    Alert.alert('Model Imported', `${matchedModel.name} has been imported and is ready to load!`);
+
+                    // If a custom model previously existed for this file, clean it up
+                    const staleCustom = customModels.find(
+                        cm => cm.fileName.toLowerCase() === fileName.toLowerCase() ||
+                              findMatchingCatalogModel(cm.fileName)?.id === matchedModel.id
+                    );
+                    if (staleCustom) {
+                        dispatch(removeCustomModel(staleCustom.id));
+                        await removeCustomModelStorage(staleCustom.id);
+                        await removeExternalModelPath(staleCustom.id);
+                    }
+
+                    Alert.alert(
+                        'Catalog Model Recognized',
+                        `"${matchedModel.name}" was recognized and linked to the catalog successfully!\n\nAll features (multimodal input, acceleration backends, and context settings) are active and ready to load.`
+                    );
                 } else {
-                    // Unknown model — create a custom model entry
-                    const displayName = fileName.replace(/\.litertlm$/, '').replace(/[_-]/g, ' ');
+                    // Truly custom model: infer realistic capabilities rather than disabling everything
+                    const customId = `custom-${fileName.replace(/\.litertlm$/i, '').replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase()}`;
+                    if (customModels.some(m => m.id === customId)) {
+                        Alert.alert('Already Imported', 'This model is already in your imported models list.');
+                        return;
+                    }
+
+                    const localPath = await LLMService.importModelFile(pickedFile.uri, fileName);
+                    const displayName = fileName.replace(/\.litertlm$/i, '').replace(/[_-]/g, ' ');
+                    const inferred = inferModelCapabilities(fileName, pickedFile.size ?? undefined);
+
                     const customModel: ModelInfo = {
                         id: customId,
                         name: displayName,
                         tag: 'custom-import',
                         size: pickedFile.size ? `${(pickedFile.size / (1024 * 1024)).toFixed(1)} MB` : 'Unknown',
-                        description: `Custom imported model from ${fileName}. This model was imported from your device and may have limited metadata.`,
+                        description: `Custom imported model from ${fileName}. Tap the edit icon to configure its capabilities and backends.`,
                         url: '',
                         fileName: fileName,
-                        badge: 'Custom',
-                        supportsVision: false,
-                        supportsAudio: false,
-                        supportsThinking: false,
-                        supportedBackends: ['GPU', 'CPU'],
-                        maxContextLength: 4096,
+                        badge: inferred.badge || 'Custom',
+                        supportsVision: inferred.supportsVision ?? false,
+                        supportsAudio: inferred.supportsAudio ?? false,
+                        supportsThinking: inferred.supportsThinking ?? false,
+                        supportedBackends: inferred.supportedBackends || ['GPU', 'CPU'],
+                        maxContextLength: inferred.maxContextLength || 4096,
                         quantization: undefined,
-                        isEmbedding: false,
-                        isCoder: false,
-                        isInstruct: true,
-                        supportsFunctionCalling: false,
+                        isEmbedding: inferred.isEmbedding ?? false,
+                        isCoder: inferred.isCoder ?? false,
+                        isInstruct: inferred.isInstruct ?? true,
+                        supportsFunctionCalling: inferred.supportsFunctionCalling ?? false,
                         isDraftModel: false,
+                        isASR: inferred.isASR ?? false,
                     };
+
                     dispatch(addCustomModel(customModel));
                     dispatch(setDownloaded({ modelId: customId, localPath }));
-                    // Always save it as an external path so it can be restored on reboot
                     dispatch(setExternalPath({ modelId: customId, externalPath: localPath }));
                     await saveExternalModelPath(customId, localPath);
                     await saveCustomModel(customModel);
-                    Alert.alert('Model Imported', `"${displayName}" has been imported as a custom model and is ready to load!`);
+
+                    // Automatically open configuration sheet so user can review and customize options
+                    setConfiguringModel(customModel);
                 }
             } catch (err: any) {
                 if (isErrorWithCode(err) && (err.code === errorCodes.IN_PROGRESS || err.code === errorCodes.OPERATION_CANCELED)) {
@@ -1047,7 +1145,8 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         modelPath,
                         preferredBackend,
                         model.supportedBackends,
-                        model.supportsVision
+                        model.supportsVision,
+                        model.maxContextLength
                     );
                     dispatch(
                         setLoadedModel({
@@ -1110,6 +1209,21 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         },
         [loadedModelId, loadedModel, activeBackend, confirmInterruptGeneration, stopAndUnload]
     );
+
+    const [configuringModel, setConfiguringModel] = React.useState<ModelInfo | null>(null);
+
+    const handleSaveModelConfig = useCallback(
+        async (updated: ModelInfo) => {
+            dispatch(updateCustomModel(updated));
+            await saveCustomModel(updated);
+            Alert.alert('Settings Saved', `Capabilities for "${updated.name}" have been updated.`);
+        },
+        [dispatch]
+    );
+
+    const handleCloseConfigModal = useCallback(() => {
+        setConfiguringModel(null);
+    }, []);
 
     return (
         <Modal
@@ -1292,6 +1406,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                         closeModal();
                                     }}
                                     onExport={() => handleExportModel(model)}
+                                    onConfigure={() => setConfiguringModel(model)}
                                     preferredBackend={preferredBackend}
                                     isUnloading={unloadingModelId === model.id}
                                     isCustomModel={customModelIds.has(model.id)}
@@ -1308,6 +1423,13 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 isPermanentlyDenied={isPermanentlyDenied}
                 onGrant={handleGrantPermission}
                 onCancel={handleCancelPermission}
+            />
+
+            <CustomModelConfigModal
+                visible={!!configuringModel}
+                model={configuringModel}
+                onClose={handleCloseConfigModal}
+                onSave={handleSaveModelConfig}
             />
         </Modal>
     );

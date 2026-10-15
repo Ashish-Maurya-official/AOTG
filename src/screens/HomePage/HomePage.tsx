@@ -50,10 +50,12 @@ import LLMService, { estimateTokens } from '../../services/llmService';
 import documentService from '../../services/documentService';
 import {
     loadExternalModelPaths,
+    saveExternalModelPath,
     removeExternalModelPath,
     loadCustomModels,
     removeCustomModelStorage,
 } from '../../services/modelStorageService';
+import { findMatchingCatalogModel } from '../../utils/modelMatching';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
 import LinearGradient from 'react-native-linear-gradient';
@@ -400,18 +402,43 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     useEffect(() => {
         let cancelled = false;
         (async () => {
-            // 1. Restore custom models from persistence
+            // 1. Restore custom models from persistence & reconcile any that match catalog
             const persistedCustomModels = await loadCustomModels();
             if (cancelled) return;
-            persistedCustomModels.forEach(cm => {
-                dispatch(addCustomModel(cm));
-            });
-
-            // 2. Load persisted external paths
             const externalPaths = await loadExternalModelPaths();
             if (cancelled) return;
 
-            // 3. Sync catalog models
+            for (const cm of persistedCustomModels) {
+                if (cancelled) return;
+                const matchedCatalog = findMatchingCatalogModel(cm.fileName) || findMatchingCatalogModel(cm.name);
+                if (matchedCatalog) {
+                    const extPath = externalPaths[cm.id];
+                    let resolvedPath = extPath;
+                    if (!resolvedPath) {
+                        const checkInternal = await LLMService.checkModelStatus(cm.fileName);
+                        if (checkInternal.isDownloaded) {
+                            resolvedPath = checkInternal.localPath;
+                        }
+                    }
+
+                    if (resolvedPath) {
+                        const exists = await LLMService.checkFileExists(resolvedPath);
+                        if (exists) {
+                            dispatch(syncModelStatus({ modelId: matchedCatalog.id, isDownloaded: true, localPath: resolvedPath }));
+                            dispatch(setExternalPath({ modelId: matchedCatalog.id, externalPath: resolvedPath }));
+                            await saveExternalModelPath(matchedCatalog.id, resolvedPath);
+                            externalPaths[matchedCatalog.id] = resolvedPath;
+                        }
+                    }
+                    await removeCustomModelStorage(cm.id);
+                    await removeExternalModelPath(cm.id);
+                    dispatch(removeCustomModel(cm.id));
+                } else {
+                    dispatch(addCustomModel(cm));
+                }
+            }
+
+            // 2. Sync catalog models
             for (const model of AVAILABLE_MODELS) {
                 if (cancelled) return;
                 const externalPath = externalPaths[model.id];
@@ -423,17 +450,36 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     } else {
                         await removeExternalModelPath(model.id);
                         dispatch(clearExternalPath(model.id));
-                        const check = await LLMService.checkModelStatus(model.fileName);
+                        let check = await LLMService.checkModelStatus(model.fileName);
+                        if (!check.isDownloaded) {
+                            const urlBasename = model.url.split('/').pop()?.split('?')[0];
+                            if (urlBasename && urlBasename !== model.fileName) {
+                                const urlCheck = await LLMService.checkModelStatus(urlBasename);
+                                if (urlCheck.isDownloaded) {
+                                    check = urlCheck;
+                                }
+                            }
+                        }
                         dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                     }
                 } else {
-                    const check = await LLMService.checkModelStatus(model.fileName);
+                    let check = await LLMService.checkModelStatus(model.fileName);
+                    if (!check.isDownloaded) {
+                        const urlBasename = model.url.split('/').pop()?.split('?')[0];
+                        if (urlBasename && urlBasename !== model.fileName) {
+                            const urlCheck = await LLMService.checkModelStatus(urlBasename);
+                            if (urlCheck.isDownloaded) {
+                                check = urlCheck;
+                            }
+                        }
+                    }
                     dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                 }
             }
 
-            // 4. Sync custom models
-            for (const cm of persistedCustomModels) {
+            // 3. Sync remaining non-catalog custom models
+            const remainingCustomModels = await loadCustomModels();
+            for (const cm of remainingCustomModels) {
                 if (cancelled) return;
                 const externalPath = externalPaths[cm.id];
                 if (externalPath) {
@@ -443,7 +489,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         dispatch(setExternalPath({ modelId: cm.id, externalPath }));
                     } else {
                         await removeExternalModelPath(cm.id);
-                        // External file gone — check if it exists in models/ dir
                         const check = await LLMService.checkModelStatus(cm.fileName);
                         if (check.isDownloaded) {
                             dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
@@ -453,7 +498,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         }
                     }
                 } else {
-                    // No external path — check the standard models directory
                     const check = await LLMService.checkModelStatus(cm.fileName);
                     if (check.isDownloaded) {
                         dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));

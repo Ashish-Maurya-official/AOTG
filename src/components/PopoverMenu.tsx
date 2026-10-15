@@ -88,7 +88,7 @@ const styles = StyleSheet.create({
         zIndex: 1000,
     },
     backdrop: {
-        ...StyleSheet.absoluteFillObject,
+        ...StyleSheet.absoluteFill,
     },
     container: {
         position: 'absolute',

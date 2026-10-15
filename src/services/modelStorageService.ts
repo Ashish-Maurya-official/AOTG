@@ -58,7 +58,10 @@ export async function loadCustomModels(): Promise<ModelInfo[]> {
  */
 export async function saveCustomModel(model: ModelInfo): Promise<void> {
     const models = await loadCustomModels();
-    if (!models.some(m => m.id === model.id)) {
+    const existingIndex = models.findIndex(m => m.id === model.id);
+    if (existingIndex >= 0) {
+        models[existingIndex] = model;
+    } else {
         models.push(model);
     }
     await AsyncStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(models));

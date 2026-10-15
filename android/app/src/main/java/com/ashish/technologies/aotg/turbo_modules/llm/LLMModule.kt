@@ -621,6 +621,35 @@ class LLMModule(
                     }
 
                     if (initializedEngine == null || successfulBackend == null) {
+                        // If vision backend was requested, the failure may be because this unknown model
+                        // lacks vision encoder weights. Safely attempt fallback in text-only mode.
+                        if (isVision) {
+                            Log.w(TAG, "Initialization failed with isVision=true. Retrying in text-only mode...")
+                            for (targetBackend in backendChain) {
+                                var eng: Engine? = null
+                                try {
+                                    val config = EngineConfig(
+                                        modelPath = file.absolutePath,
+                                        backend = createBackend(targetBackend),
+                                        visionBackend = null,
+                                        maxNumTokens = maxContextLength.toInt(),
+                                        maxNumImages = null
+                                    )
+                                    eng = Engine(config)
+                                    eng.initialize()
+                                    initializedEngine = eng
+                                    successfulBackend = targetBackend
+                                    Log.i(TAG, "Successfully initialized LiteRT-LM in text-only fallback on $targetBackend!")
+                                    break
+                                } catch (t: Throwable) {
+                                    lastInitError = t
+                                    closeEngineSafely(eng)
+                                }
+                            }
+                        }
+                    }
+
+                    if (initializedEngine == null || successfulBackend == null) {
                         val errorDetail = lastInitError?.message ?: lastInitError?.javaClass?.simpleName ?: "Unknown error"
                         throw Exception("Failed to initialize on backends (${backendChain.joinToString(", ")}): $errorDetail")
                     }
