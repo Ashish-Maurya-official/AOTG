@@ -22,6 +22,7 @@ class MainApplication : Application(), ReactApplication {
           add(LLMPackage())
           add(AccessibilityPackage())
           add(DocumentProcessorPackage())
+          add(MemoryPackage())
         },
     )
   }

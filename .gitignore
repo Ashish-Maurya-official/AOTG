@@ -81,3 +81,6 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Local agent plugins and tooling
+.agents/
