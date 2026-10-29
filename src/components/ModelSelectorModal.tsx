@@ -1,6 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo } from 'react';
 import {
-    ActivityIndicator,
     Alert,
     Animated,
     Dimensions,
@@ -8,12 +7,12 @@ import {
     PanResponder,
     Platform,
     Pressable,
-    ScrollView,
     StyleSheet,
     Text,
     View,
     Linking,
     PermissionsAndroid,
+    FlatList,
 } from 'react-native';
 import { pick, types as DocumentPickerTypes, isErrorWithCode, errorCodes, saveDocuments } from '@react-native-documents/picker';
 import { useSelector, useDispatch } from 'react-redux';
@@ -32,7 +31,6 @@ import LoaderIcon from '../static/images/SVG/LoaderIcon';
 import DriveIcon from '../static/images/SVG/DriveIcon';
 import ShareIcon from '../static/images/SVG/ShareIcon';
 import EditIcon from '../static/images/SVG/EditIcon';
-import useLLM from '../hooks/useLLM';
 
 import {
     AVAILABLE_MODELS,
@@ -133,7 +131,7 @@ const formatBytes = (bytes: number): string => {
 const ModelItem = memo(
     ({
         model,
-        isSelected,
+        isSelected: _isSelected,
         modelState,
         activeBackend,
         onDownload,
@@ -141,12 +139,13 @@ const ModelItem = memo(
         onLoad,
         onUnload,
         onDelete,
-        onSelect,
+        onSelect: _onSelect,
         onExport,
         onConfigure,
         preferredBackend,
         isUnloading,
         isCustomModel,
+        isGenerating = false,
         colors,
     }: {
         model: ModelInfo;
@@ -164,12 +163,11 @@ const ModelItem = memo(
         preferredBackend: string;
         isUnloading: boolean;
         isCustomModel: boolean;
+        isGenerating?: boolean;
         colors: any;
     }) => {
         const { status, progress, speedMBs, bytesDownloaded, totalBytes, error } =
             modelState;
-        
-        const { isGenerating } = useLLM();
 
         const isLoaded = status === 'loaded';
         const isDownloaded = status === 'downloaded';
@@ -585,7 +583,10 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         })
     ).current;
 
+    const [isOpenSettled, setIsOpenSettled] = React.useState(false);
+
     const openModal = React.useCallback(() => {
+        setIsOpenSettled(false);
         backdropOpacity.setValue(0);
         translateY.setValue(SCREEN_HEIGHT);
         Animated.parallel([
@@ -599,10 +600,13 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 useNativeDriver: true,
                 bounciness: 4,
             }),
-        ]).start();
+        ]).start(() => {
+            setIsOpenSettled(true);
+        });
     }, [backdropOpacity, translateY]);
 
     const closeModal = React.useCallback(() => {
+        setIsOpenSettled(false);
         Animated.parallel([
             Animated.timing(backdropOpacity, {
                 toValue: 0,
@@ -643,6 +647,9 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     );
     const customModels = useSelector(
         (state: RootState) => state.llm.customModels
+    );
+    const isGenerating = useSelector(
+        (state: RootState) => state.llm.isGenerating
     );
 
     // Permission Handling State
@@ -696,59 +703,93 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         pendingAction.current = null;
     }, []);
 
-    // Sync disk state for all models on mount & when modal opens
-    // Also restores persisted external paths and custom models from AsyncStorage
+    // Sync disk state for all models on mount & when modal opens (only after slide-up settles)
     useEffect(() => {
-        if (!visible) return;
+        if (!visible || !isOpenSettled) return;
+
+        let isCancelled = false;
 
         (async () => {
-            // 1. Restore custom models from persistence & reconcile any matching catalog models
-            const persistedCustomModels = await loadCustomModels();
-            const externalPaths = await loadExternalModelPaths();
+                // 1. Restore custom models from persistence & reconcile any matching catalog models
+                const persistedCustomModels = await loadCustomModels();
+                if (isCancelled) return;
+                const externalPaths = await loadExternalModelPaths();
+                if (isCancelled) return;
 
-            for (const cm of persistedCustomModels) {
-                const matchedCatalog = findMatchingCatalogModel(cm.fileName) || findMatchingCatalogModel(cm.name);
-                if (matchedCatalog) {
-                    const extPath = externalPaths[cm.id];
-                    let resolvedPath = extPath;
-                    if (!resolvedPath) {
-                        const checkInternal = await LLMService.checkModelStatus(cm.fileName);
-                        if (checkInternal.isDownloaded) {
-                            resolvedPath = checkInternal.localPath;
+                for (const cm of persistedCustomModels) {
+                    if (isCancelled) return;
+                    const matchedCatalog = findMatchingCatalogModel(cm.fileName) || findMatchingCatalogModel(cm.name);
+                    if (matchedCatalog) {
+                        const extPath = externalPaths[cm.id];
+                        let resolvedPath = extPath;
+                        if (!resolvedPath) {
+                            const checkInternal = await LLMService.checkModelStatus(cm.fileName);
+                            if (checkInternal.isDownloaded) {
+                                resolvedPath = checkInternal.localPath;
+                            }
                         }
-                    }
 
-                    if (resolvedPath) {
-                        const exists = await LLMService.checkFileExists(resolvedPath);
-                        if (exists) {
-                            dispatch(syncModelStatus({ modelId: matchedCatalog.id, isDownloaded: true, localPath: resolvedPath }));
-                            dispatch(setExternalPath({ modelId: matchedCatalog.id, externalPath: resolvedPath }));
-                            await saveExternalModelPath(matchedCatalog.id, resolvedPath);
-                            externalPaths[matchedCatalog.id] = resolvedPath;
+                        if (resolvedPath) {
+                            const exists = await LLMService.checkFileExists(resolvedPath);
+                            if (exists && !isCancelled) {
+                                dispatch(syncModelStatus({ modelId: matchedCatalog.id, isDownloaded: true, localPath: resolvedPath }));
+                                dispatch(setExternalPath({ modelId: matchedCatalog.id, externalPath: resolvedPath }));
+                                await saveExternalModelPath(matchedCatalog.id, resolvedPath);
+                                externalPaths[matchedCatalog.id] = resolvedPath;
+                            }
                         }
-                    }
-                    await removeCustomModelStorage(cm.id);
-                    await removeExternalModelPath(cm.id);
-                    dispatch(removeCustomModel(cm.id));
-                } else {
-                    dispatch(addCustomModel(cm));
-                }
-            }
-
-            // 2. Sync catalog models
-            for (const model of AVAILABLE_MODELS) {
-                const externalPath = externalPaths[model.id];
-                if (externalPath) {
-                    // Validate the external file still exists
-                    const exists = await LLMService.checkFileExists(externalPath);
-                    if (exists) {
-                        dispatch(syncModelStatus({ modelId: model.id, isDownloaded: true, localPath: externalPath }));
-                        dispatch(setExternalPath({ modelId: model.id, externalPath }));
+                        if (!isCancelled) {
+                            await removeCustomModelStorage(cm.id);
+                            await removeExternalModelPath(cm.id);
+                            dispatch(removeCustomModel(cm.id));
+                        }
                     } else {
-                        // File was deleted externally — clear stale path
-                        await removeExternalModelPath(model.id);
-                        dispatch(clearExternalPath(model.id));
-                        // Fall back to checking internal storage
+                        if (!isCancelled) {
+                            dispatch(addCustomModel(cm));
+                        }
+                    }
+                }
+
+                // 2. Sync catalog models
+                for (const model of AVAILABLE_MODELS) {
+                    if (isCancelled) return;
+                    const externalPath = externalPaths[model.id];
+                    if (externalPath) {
+                        // Validate the external file still exists
+                        const exists = await LLMService.checkFileExists(externalPath);
+                        if (isCancelled) return;
+                        if (exists) {
+                            const cur = modelStatuses[model.id];
+                            if (!cur || cur.status !== 'downloaded' || cur.localPath !== externalPath) {
+                                dispatch(syncModelStatus({ modelId: model.id, isDownloaded: true, localPath: externalPath }));
+                                dispatch(setExternalPath({ modelId: model.id, externalPath }));
+                            }
+                        } else {
+                            // File was deleted externally — clear stale path
+                            await removeExternalModelPath(model.id);
+                            if (isCancelled) return;
+                            dispatch(clearExternalPath(model.id));
+                            // Fall back to checking internal storage
+                            let check = await LLMService.checkModelStatus(model.fileName);
+                            if (!check.isDownloaded) {
+                                const urlBasename = model.url.split('/').pop()?.split('?')[0];
+                                if (urlBasename && urlBasename !== model.fileName) {
+                                    const urlCheck = await LLMService.checkModelStatus(urlBasename);
+                                    if (urlCheck.isDownloaded) {
+                                        check = urlCheck;
+                                    }
+                                }
+                            }
+                            if (!isCancelled) {
+                                const cur = modelStatuses[model.id];
+                                const targetStatus = check.isDownloaded ? 'downloaded' : 'not_downloaded';
+                                if (!cur || cur.status !== targetStatus || cur.localPath !== check.localPath) {
+                                    dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
+                                }
+                            }
+                        }
+                    } else {
+                        // Normal check against internal models/ dir
                         let check = await LLMService.checkModelStatus(model.fileName);
                         if (!check.isDownloaded) {
                             const urlBasename = model.url.split('/').pop()?.split('?')[0];
@@ -759,55 +800,65 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                                 }
                             }
                         }
-                        dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
-                    }
-                } else {
-                    // Normal check against internal models/ dir
-                    let check = await LLMService.checkModelStatus(model.fileName);
-                    if (!check.isDownloaded) {
-                        const urlBasename = model.url.split('/').pop()?.split('?')[0];
-                        if (urlBasename && urlBasename !== model.fileName) {
-                            const urlCheck = await LLMService.checkModelStatus(urlBasename);
-                            if (urlCheck.isDownloaded) {
-                                check = urlCheck;
+                        if (!isCancelled) {
+                            const cur = modelStatuses[model.id];
+                            const targetStatus = check.isDownloaded ? 'downloaded' : 'not_downloaded';
+                            if (!cur || cur.status !== targetStatus || cur.localPath !== check.localPath) {
+                                dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                             }
                         }
                     }
-                    dispatch(syncModelStatus({ modelId: model.id, isDownloaded: check.isDownloaded, localPath: check.localPath }));
                 }
-            }
 
-            // 3. Sync remaining non-catalog custom models
-            const remainingCustomModels = await loadCustomModels();
-            for (const cm of remainingCustomModels) {
-                const externalPath = externalPaths[cm.id];
-                if (externalPath) {
-                    const exists = await LLMService.checkFileExists(externalPath);
-                    if (exists) {
-                        dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: externalPath }));
-                        dispatch(setExternalPath({ modelId: cm.id, externalPath }));
-                    } else {
-                        await removeExternalModelPath(cm.id);
-                        const check = await LLMService.checkModelStatus(cm.fileName);
-                        if (check.isDownloaded) {
-                            dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                // 3. Sync remaining non-catalog custom models
+                if (isCancelled) return;
+                const remainingCustomModels = await loadCustomModels();
+                for (const cm of remainingCustomModels) {
+                    if (isCancelled) return;
+                    const externalPath = externalPaths[cm.id];
+                    if (externalPath) {
+                        const exists = await LLMService.checkFileExists(externalPath);
+                        if (isCancelled) return;
+                        if (exists) {
+                            const cur = modelStatuses[cm.id];
+                            if (!cur || cur.status !== 'downloaded' || cur.localPath !== externalPath) {
+                                dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: externalPath }));
+                                dispatch(setExternalPath({ modelId: cm.id, externalPath }));
+                            }
                         } else {
-                            await removeCustomModelStorage(cm.id);
-                            dispatch(removeCustomModel(cm.id));
+                            await removeExternalModelPath(cm.id);
+                            if (isCancelled) return;
+                            const check = await LLMService.checkModelStatus(cm.fileName);
+                            if (!isCancelled) {
+                                if (check.isDownloaded) {
+                                    dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                                } else {
+                                    await removeCustomModelStorage(cm.id);
+                                    dispatch(removeCustomModel(cm.id));
+                                }
+                            }
+                        }
+                    } else {
+                        const check = await LLMService.checkModelStatus(cm.fileName);
+                        if (!isCancelled) {
+                            if (check.isDownloaded) {
+                                const cur = modelStatuses[cm.id];
+                                if (!cur || cur.status !== 'downloaded' || cur.localPath !== check.localPath) {
+                                    dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
+                                }
+                            } else {
+                                await removeCustomModelStorage(cm.id);
+                                dispatch(removeCustomModel(cm.id));
+                            }
                         }
                     }
-                } else {
-                    const check = await LLMService.checkModelStatus(cm.fileName);
-                    if (check.isDownloaded) {
-                        dispatch(syncModelStatus({ modelId: cm.id, isDownloaded: true, localPath: check.localPath }));
-                    } else {
-                        await removeCustomModelStorage(cm.id);
-                        dispatch(removeCustomModel(cm.id));
-                    }
                 }
-            }
-        })();
-    }, [visible, dispatch]);
+            })();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [visible, isOpenSettled, dispatch, modelStatuses]);
 
     // Re-entrancy guard shared by load / unload / delete so a double-tap (or a
     // Load tapped while an Unload is still in flight) can never race the native
@@ -1114,7 +1165,7 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 ]
             );
         },
-        [dispatch, loadedModelId, customModelIds, confirmInterruptGeneration, stopAndUnload]
+        [dispatch, loadedModelId, customModelIds, confirmInterruptGeneration, stopAndUnload, modelStatuses]
     );
 
     // Real Model Loading Handler with Fallback Notification
@@ -1224,6 +1275,95 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     const handleCloseConfigModal = useCallback(() => {
         setConfiguringModel(null);
     }, []);
+
+    const displayedModels = useMemo(() => {
+        return allModels
+            .filter(
+                (m) =>
+                    preferredBackend === 'AUTO' ||
+                    m.supportedBackends.includes(
+                        preferredBackend as BackendType
+                    )
+            )
+            .sort((a, b) => {
+                const statusA = modelStatuses[a.id]?.status || 'not_downloaded';
+                const statusB = modelStatuses[b.id]?.status || 'not_downloaded';
+
+                const isDownloadedA =
+                    statusA === 'downloaded' ||
+                    statusA === 'loading' ||
+                    statusA === 'loaded';
+                const isDownloadedB =
+                    statusB === 'downloaded' ||
+                    statusB === 'loading' ||
+                    statusB === 'loaded';
+
+                if (isDownloadedA && !isDownloadedB) return -1;
+                if (!isDownloadedA && isDownloadedB) return 1;
+                return 0;
+            });
+    }, [allModels, preferredBackend, modelStatuses]);
+
+    const keyExtractor = useCallback((item: ModelInfo) => item.id, []);
+
+    const handleSelectAndClose = useCallback(
+        (modelId: string) => {
+            onSelectModel(modelId);
+            closeModal();
+        },
+        [onSelectModel, closeModal]
+    );
+
+    const renderModelItem = useCallback(
+        ({ item }: { item: ModelInfo }) => {
+            const modelState: ModelState = modelStatuses[item.id] || {
+                status: 'not_downloaded',
+                progress: 0,
+            };
+
+            return (
+                <ModelItem
+                    model={item}
+                    isSelected={item.id === selectedModelId}
+                    modelState={modelState}
+                    activeBackend={
+                        item.id === loadedModelId ? activeBackend : null
+                    }
+                    onDownload={() => handleDownload(item)}
+                    onCancelDownload={() => handleCancelDownload(item.id)}
+                    onLoad={() => handleLoad(item)}
+                    onUnload={handleUnload}
+                    onDelete={() => handleDelete(item)}
+                    onSelect={() => handleSelectAndClose(item.id)}
+                    onExport={() => handleExportModel(item)}
+                    onConfigure={() => setConfiguringModel(item)}
+                    preferredBackend={preferredBackend}
+                    isUnloading={unloadingModelId === item.id}
+                    isCustomModel={customModelIds.has(item.id)}
+                    isGenerating={isGenerating}
+                    colors={colors}
+                />
+            );
+        },
+        [
+            modelStatuses,
+            selectedModelId,
+            loadedModelId,
+            activeBackend,
+            handleDownload,
+            handleCancelDownload,
+            handleLoad,
+            handleUnload,
+            handleDelete,
+            handleSelectAndClose,
+            handleExportModel,
+            preferredBackend,
+            unloadingModelId,
+            customModelIds,
+            isGenerating,
+            colors,
+        ]
+    );
 
     return (
         <Modal
@@ -1353,68 +1493,18 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         </View>
                     </View>
 
-                    {/* Model List */}
-                    <ScrollView
+                    {/* Model List (Virtualized with FlatList) */}
+                    <FlatList
+                        data={displayedModels}
+                        keyExtractor={keyExtractor}
+                        renderItem={renderModelItem}
                         showsVerticalScrollIndicator={false}
-                        contentContainerStyle={styles.listContent}>
-                        {allModels.filter(
-                            (m) =>
-                                preferredBackend === 'AUTO' ||
-                                m.supportedBackends.includes(
-                                    preferredBackend as BackendType
-                                )
-                        )
-                        .sort((a, b) => {
-                            const statusA = modelStatuses[a.id]?.status || 'not_downloaded';
-                            const statusB = modelStatuses[b.id]?.status || 'not_downloaded';
-                            
-                            const isDownloadedA = statusA === 'downloaded' || statusA === 'loading' || statusA === 'loaded';
-                            const isDownloadedB = statusB === 'downloaded' || statusB === 'loading' || statusB === 'loaded';
-                            
-                            if (isDownloadedA && !isDownloadedB) return -1;
-                            if (!isDownloadedA && isDownloadedB) return 1;
-                            return 0;
-                        })
-                        .map((model) => {
-                            const modelState: ModelState = modelStatuses[
-                                model.id
-                            ] || {
-                                status: 'not_downloaded',
-                                progress: 0,
-                            };
-
-                            return (
-                                <ModelItem
-                                    key={model.id}
-                                    model={model}
-                                    isSelected={model.id === selectedModelId}
-                                    modelState={modelState}
-                                    activeBackend={
-                                        model.id === loadedModelId
-                                            ? activeBackend
-                                            : null
-                                    }
-                                    onDownload={() => handleDownload(model)}
-                                    onCancelDownload={() =>
-                                        handleCancelDownload(model.id)
-                                    }
-                                    onLoad={() => handleLoad(model)}
-                                    onUnload={handleUnload}
-                                    onDelete={() => handleDelete(model)}
-                                    onSelect={() => {
-                                        onSelectModel(model.id);
-                                        closeModal();
-                                    }}
-                                    onExport={() => handleExportModel(model)}
-                                    onConfigure={() => setConfiguringModel(model)}
-                                    preferredBackend={preferredBackend}
-                                    isUnloading={unloadingModelId === model.id}
-                                    isCustomModel={customModelIds.has(model.id)}
-                                    colors={colors}
-                                />
-                            );
-                        })}
-                    </ScrollView>
+                        contentContainerStyle={styles.listContent}
+                        initialNumToRender={6}
+                        maxToRenderPerBatch={6}
+                        windowSize={5}
+                        removeClippedSubviews={Platform.OS === 'android'}
+                    />
                 </Animated.View>
             </View>
 

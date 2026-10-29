@@ -223,7 +223,9 @@ class LLMServiceImpl {
 
       const backendStr = Array.from(chainSet).join(',');
       
-      const result = await NativeLLM.initialize(modelPath, backendStr, isVision, maxContextLength);
+      // Enforce strict mobile limit (never allocate 32K-256K KV-cache on mobile hardware)
+      const safeContextLength = Math.min(Math.max(maxContextLength || 4096, 512), 4096);
+      const result = await NativeLLM.initialize(modelPath, backendStr, isVision, safeContextLength);
       
       return {
         ...result,

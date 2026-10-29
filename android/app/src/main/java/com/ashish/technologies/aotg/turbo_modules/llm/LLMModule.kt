@@ -93,6 +93,7 @@ class LLMModule(
     @Volatile private var currentModelPath: String? = null
     private var currentBackend: String = "AUTO"
     @Volatile private var activeBackend: String = "CPU"
+    @Volatile private var activeMaxTokens: Int = MAX_NUM_TOKENS
     private var listenerCount = 0
 
     /** True while a generation job is alive (including the wind-down after a stop). */
@@ -168,6 +169,7 @@ class LLMModule(
         isLoaded = false
         currentModelPath = null
         activeBackend = "CPU"
+        activeMaxTokens = MAX_NUM_TOKENS
         currentSession = null
         val after = Debug.getNativeHeapAllocatedSize()
         Log.i(TAG, "Engine released. Native heap: ${before / 1048576} MB -> ${after / 1048576} MB")
@@ -579,6 +581,15 @@ class LLMModule(
                     stopGenerationAndAwait()
                     releaseEngineResources()
 
+                    // Enforce a strict mobile limit on maxNumTokens (min(requestedContext, 4096)).
+                    // Mobile hardware cannot support 32K–256K KV-caches without instant OOM crashes.
+                    val effectiveMaxTokens = if (maxContextLength > 0) {
+                        minOf(maxContextLength.toInt(), MAX_NUM_TOKENS)
+                    } else {
+                        MAX_NUM_TOKENS
+                    }
+                    Log.i(TAG, "Configuring LiteRT-LM context window: requested=$maxContextLength, effective=$effectiveMaxTokens (capped at $MAX_NUM_TOKENS)")
+
                     val backendChain = if (backend.contains(",")) {
                         backend.split(",").map { it.trim().uppercase() }.filter { it.isNotEmpty() }
                     } else {
@@ -602,7 +613,7 @@ class LLMModule(
                                 modelPath = file.absolutePath,
                                 backend = createBackend(targetBackend),
                                 visionBackend = if (isVision) createBackend(targetBackend) else null,
-                                maxNumTokens = maxContextLength.toInt(),
+                                maxNumTokens = effectiveMaxTokens,
                                 maxNumImages = if (isVision) 1 else null
                             )
                             eng = Engine(config)
@@ -632,7 +643,7 @@ class LLMModule(
                                         modelPath = file.absolutePath,
                                         backend = createBackend(targetBackend),
                                         visionBackend = null,
-                                        maxNumTokens = maxContextLength.toInt(),
+                                        maxNumTokens = effectiveMaxTokens,
                                         maxNumImages = null
                                     )
                                     eng = Engine(config)
@@ -666,6 +677,7 @@ class LLMModule(
                     currentModelPath = file.absolutePath
                     currentBackend = backend
                     activeBackend = successfulBackend
+                    activeMaxTokens = effectiveMaxTokens
                     isLoaded = true
 
                     val wasFallback = !successfulBackend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
@@ -919,7 +931,7 @@ class LLMModule(
         }
         promise.resolve(Arguments.createMap().apply {
             putInt("tokenCount", tokenCount)
-            putInt("maxTokens", MAX_NUM_TOKENS)
+            putInt("maxTokens", activeMaxTokens)
             putBoolean("isLoaded", isLoaded && conv != null)
         })
     }

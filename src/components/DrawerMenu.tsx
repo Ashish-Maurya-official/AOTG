@@ -249,7 +249,16 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
     const activeBackend = useSelector((state: RootState) => state.llm.activeBackend);
     const preferredBackend = useSelector((state: RootState) => state.llm.preferredBackend);
     const customModels = useSelector((state: RootState) => state.llm.customModels);
-    const modelStatuses = useSelector((state: RootState) => state.llm.modelStatuses);
+    
+    // Granular selector: only triggers re-render if the active model's status changes
+    const currentModelStatus = useSelector((state: RootState) => {
+        const loadedId = state.llm.loadedModelId;
+        const selId = state.llm.selectedModelId;
+        if (loadedId && state.llm.modelStatuses[loadedId]?.status === 'loaded') {
+            return 'loaded';
+        }
+        return state.llm.modelStatuses[selId]?.status || 'not_downloaded';
+    });
 
     const allModels = useMemo(
         () => [...AVAILABLE_MODELS, ...customModels],
@@ -270,14 +279,6 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
     // The primary model to report in telemetry (prefers the active loaded model)
     const activeDisplayModel = loadedModel || selectedModel;
 
-    // Real status of the selected/loaded model
-    const currentModelStatus = useMemo(() => {
-        if (loadedModelId && modelStatuses[loadedModelId]?.status === 'loaded') {
-            return 'loaded';
-        }
-        return modelStatuses[selectedModelId]?.status || 'not_downloaded';
-    }, [loadedModelId, selectedModelId, modelStatuses]);
-
     const isModelActiveInMemory = currentModelStatus === 'loaded';
 
     // ── Real System Telemetry (Live RAM & Context Usage) ─────────────
@@ -292,11 +293,14 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
         maxTokens: 4096,
     });
 
-    // Query real RAM usage and context usage when drawer opens
+    const [isOpenSettled, setIsOpenSettled] = useState(false);
+
+    // Query real RAM usage and context usage when drawer opens (only after slide-in settles)
     useEffect(() => {
-        if (!isVisible) return;
+        if (!isVisible || !isOpenSettled) return;
 
         let isCancelled = false;
+        let intervalId: ReturnType<typeof setInterval> | null = null;
 
         const fetchRealTelemetry = async () => {
             let totalMemBytes = 0;
@@ -376,17 +380,16 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
             }
         };
 
-        // Initial fetch on drawer open
         fetchRealTelemetry();
-
-        // Real-time polling every 2 seconds while the drawer is visible
-        const intervalId = setInterval(fetchRealTelemetry, 2000);
+        intervalId = setInterval(fetchRealTelemetry, 2000);
 
         return () => {
             isCancelled = true;
-            clearInterval(intervalId);
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
         };
-    }, [isVisible, isModelActiveInMemory, activeDisplayModel]);
+    }, [isVisible, isOpenSettled, isModelActiveInMemory, activeDisplayModel]);
 
     // Animations
     const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -412,8 +415,11 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
                     duration: 250,
                     useNativeDriver: true,
                 }),
-            ]).start();
+            ]).start(() => {
+                setIsOpenSettled(true);
+            });
         } else {
+            setIsOpenSettled(false);
             Animated.parallel([
                 Animated.timing(slideAnim, {
                     toValue: -DRAWER_WIDTH,
