@@ -12,6 +12,7 @@ import {
     Easing,
     Platform,
     NativeModules,
+    PanResponder,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSelector, useDispatch } from 'react-redux';
@@ -28,6 +29,25 @@ import { PlusIcon, AgentIcon, CloseIcon } from './SharedIcons';
 const { width } = Dimensions.get('window');
 const isTablet = width >= 768;
 const DRAWER_WIDTH = isTablet ? 380 : Math.min(width * 0.82, 360);
+
+// ── Static Device Information ───────────────────────────────────────
+const getDeviceName = (): string => {
+    const brand = (Platform.constants as any)?.Brand || (Platform.OS === 'ios' ? 'Apple' : '');
+    const model = (Platform.constants as any)?.Model || (Platform.OS === 'ios' ? 'iPhone' : 'Android Device');
+    const formattedBrand = brand ? `${brand.charAt(0).toUpperCase()}${brand.slice(1).toLowerCase()} ` : '';
+    return `${formattedBrand}${model}`;
+};
+
+const getDeviceSubtitle = (): string => {
+    if (Platform.OS === 'android') {
+        const release = (Platform.constants as any)?.Release || Platform.Version;
+        return `Android ${release} • Zero-Cloud`;
+    }
+    return `iOS ${Platform.Version} • Zero-Cloud`;
+};
+
+const REAL_DEVICE_NAME = getDeviceName();
+const REAL_DEVICE_SUBTITLE = getDeviceSubtitle();
 
 // ── Vector Icons (Memoized) ──────────────────────────────────────────
 
@@ -391,53 +411,127 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
         };
     }, [isVisible, isOpenSettled, isModelActiveInMemory, activeDisplayModel]);
 
-    // Animations
+    // Animations & Modal Visibility Lifecycle
+    const [modalVisible, setModalVisible] = useState(isVisible);
+    const isClosingRef = useRef(false);
     const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
     const fadeAnim = useRef(new Animated.Value(0)).current;
     const pulseAnim = useRef(new Animated.Value(0.4)).current;
 
-    // Trigger haptic and open/close animations
+    // Smooth, 60fps Open Animation (Fluid deceleration curve)
+    const openDrawer = useCallback(() => {
+        isClosingRef.current = false;
+        setIsOpenSettled(false);
+        slideAnim.setValue(-DRAWER_WIDTH);
+        fadeAnim.setValue(0);
+
+        ReactNativeHapticFeedback.trigger('impactLight', {
+            enableVibrateFallback: true,
+            ignoreAndroidSystemSettings: false,
+        });
+
+        Animated.parallel([
+            Animated.timing(slideAnim, {
+                toValue: 0,
+                duration: 280,
+                easing: Easing.bezier(0.16, 1, 0.3, 1),
+                useNativeDriver: true,
+            }),
+            Animated.timing(fadeAnim, {
+                toValue: 1,
+                duration: 250,
+                easing: Easing.out(Easing.quad),
+                useNativeDriver: true,
+            }),
+        ]).start((result) => {
+            if (result.finished) {
+                setIsOpenSettled(true);
+            }
+        });
+    }, [slideAnim, fadeAnim]);
+
+    // Smooth, 60fps Close Animation (Accelerated exit curve)
+    const closeDrawer = useCallback((callback?: () => void) => {
+        if (isClosingRef.current) return;
+        isClosingRef.current = true;
+        setIsOpenSettled(false);
+
+        Animated.parallel([
+            Animated.timing(slideAnim, {
+                toValue: -DRAWER_WIDTH,
+                duration: 220,
+                easing: Easing.bezier(0.4, 0, 1, 1),
+                useNativeDriver: true,
+            }),
+            Animated.timing(fadeAnim, {
+                toValue: 0,
+                duration: 200,
+                easing: Easing.out(Easing.quad),
+                useNativeDriver: true,
+            }),
+        ]).start(() => {
+            setModalVisible(false);
+            isClosingRef.current = false;
+            onClose();
+            callback?.();
+        });
+    }, [slideAnim, fadeAnim, onClose]);
+
+    // Synchronize parent isVisible with smooth open/close lifecycle
     useEffect(() => {
         if (isVisible) {
-            ReactNativeHapticFeedback.trigger('impactLight', {
-                enableVibrateFallback: true,
-                ignoreAndroidSystemSettings: false,
-            });
-            Animated.parallel([
-                Animated.spring(slideAnim, {
-                    toValue: 0,
-                    tension: 55,
-                    friction: 9,
-                    useNativeDriver: true,
-                }),
-                Animated.timing(fadeAnim, {
-                    toValue: 1,
-                    duration: 250,
-                    useNativeDriver: true,
-                }),
-            ]).start(() => {
-                setIsOpenSettled(true);
-            });
-        } else {
-            setIsOpenSettled(false);
-            Animated.parallel([
-                Animated.timing(slideAnim, {
-                    toValue: -DRAWER_WIDTH,
-                    duration: 220,
-                    easing: Easing.in(Easing.ease),
-                    useNativeDriver: true,
-                }),
-                Animated.timing(fadeAnim, {
-                    toValue: 0,
-                    duration: 220,
-                    useNativeDriver: true,
-                }),
-            ]).start();
+            setModalVisible(true);
+            openDrawer();
+        } else if (modalVisible && !isClosingRef.current) {
+            closeDrawer();
         }
-    }, [isVisible, slideAnim, fadeAnim]);
+    }, [isVisible, openDrawer, closeDrawer, modalVisible]);
 
-    // Continuous subtle neural breathing pulse for the on-device badge
+    // PanResponder for natural swipe-to-close gesture
+    const panResponder = useRef(
+        PanResponder.create({
+            onStartShouldSetPanResponder: () => false,
+            onMoveShouldSetPanResponder: (_, gestureState) => {
+                // Only capture deliberate horizontal leftward swipes, preserving vertical list scrolling
+                return gestureState.dx < -8 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5;
+            },
+            onPanResponderMove: (_, gestureState) => {
+                if (gestureState.dx < 0) {
+                    const clampedX = Math.max(-DRAWER_WIDTH, gestureState.dx);
+                    slideAnim.setValue(clampedX);
+                    const progress = 1 + clampedX / DRAWER_WIDTH;
+                    fadeAnim.setValue(Math.max(0, Math.min(1, progress)));
+                }
+            },
+            onPanResponderRelease: (_, gestureState) => {
+                if (gestureState.dx < -DRAWER_WIDTH * 0.25 || gestureState.vx < -0.5) {
+                    closeDrawer();
+                } else {
+                    Animated.parallel([
+                        Animated.spring(slideAnim, {
+                            toValue: 0,
+                            tension: 68,
+                            friction: 11,
+                            useNativeDriver: true,
+                        }),
+                        Animated.timing(fadeAnim, {
+                            toValue: 1,
+                            duration: 150,
+                            useNativeDriver: true,
+                        }),
+                    ]).start();
+                }
+            },
+        })
+    ).current;
+
+    // Continuous subtle neural breathing pulse for the on-device badge (only when open)
     useEffect(() => {
+        if (!isOpenSettled) {
+            pulseAnim.setValue(0.4);
+            return;
+        }
+
         const pulseLoop = Animated.loop(
             Animated.sequence([
                 Animated.timing(pulseAnim, {
@@ -456,27 +550,30 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
         );
         pulseLoop.start();
         return () => pulseLoop.stop();
-    }, [pulseAnim]);
+    }, [isOpenSettled, pulseAnim]);
 
     // Action handlers (memoized with useCallback)
     const handleClose = useCallback(() => {
-        onClose();
-    }, [onClose]);
+        closeDrawer();
+    }, [closeDrawer]);
 
     const handleNewChatPress = useCallback(() => {
-        onClose();
-        onNewChat?.();
-    }, [onClose, onNewChat]);
+        closeDrawer(() => {
+            onNewChat?.();
+        });
+    }, [closeDrawer, onNewChat]);
 
     const handleAgentPress = useCallback(() => {
-        onClose();
-        onOpenAgent?.();
-    }, [onClose, onOpenAgent]);
+        closeDrawer(() => {
+            onOpenAgent?.();
+        });
+    }, [closeDrawer, onOpenAgent]);
 
     const handleModelSelectorPress = useCallback(() => {
-        onClose();
-        onOpenModelSelector?.();
-    }, [onClose, onOpenModelSelector]);
+        closeDrawer(() => {
+            onOpenModelSelector?.();
+        });
+    }, [closeDrawer, onOpenModelSelector]);
 
     const handleToggleTheme = useCallback(() => {
         ReactNativeHapticFeedback.trigger('impactLight', {
@@ -487,8 +584,8 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
     }, [dispatch]);
 
     const handleSelectChat = useCallback((_id: string) => {
-        onClose();
-    }, [onClose]);
+        closeDrawer();
+    }, [closeDrawer]);
 
     // ── Real Derived Backend Label & Status ───────────────────────────
     const realBackendTag = useMemo(() => {
@@ -517,25 +614,9 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
         return activeDisplayModel?.size || 'On-Device';
     }, [currentModelStatus, activeBackend, activeDisplayModel]);
 
-    // Real device brand and model from React Native Platform constants
-    const realDeviceName = useMemo(() => {
-        const brand = (Platform.constants as any)?.Brand || (Platform.OS === 'ios' ? 'Apple' : '');
-        const model = (Platform.constants as any)?.Model || (Platform.OS === 'ios' ? 'iPhone' : 'Android Device');
-        const formattedBrand = brand ? `${brand.charAt(0).toUpperCase()}${brand.slice(1).toLowerCase()} ` : '';
-        return `${formattedBrand}${model}`;
-    }, []);
-
-    const realDeviceSubtitle = useMemo(() => {
-        if (Platform.OS === 'android') {
-            const release = (Platform.constants as any)?.Release || Platform.Version;
-            return `Android ${release} • Zero-Cloud`;
-        }
-        return `iOS ${Platform.Version} • Zero-Cloud`;
-    }, []);
-
     return (
         <Modal
-            visible={isVisible}
+            visible={modalVisible}
             transparent
             animationType="none"
             statusBarTranslucent={true}
@@ -548,6 +629,7 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
 
                 {/* Main Drawer Sliding Sheet */}
                 <Animated.View
+                    {...panResponder.panHandlers}
                     style={[
                         styles.drawer,
                         {
@@ -791,10 +873,10 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
                                 </View>
                                 <View style={styles.deviceTextCol}>
                                     <Text style={[styles.deviceNameText, { color: colors.text }]} numberOfLines={1}>
-                                        {realDeviceName}
+                                        {REAL_DEVICE_NAME}
                                     </Text>
                                     <Text style={[styles.deviceEngineText, { color: colors.secondaryText }]}>
-                                        {realDeviceSubtitle}
+                                        {REAL_DEVICE_SUBTITLE}
                                     </Text>
                                 </View>
                             </View>

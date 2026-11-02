@@ -10,15 +10,17 @@ interface TextBlockProps {
 const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
     const { colors } = useTheme();
 
-
-
-    // Render a single line as nested <Text> (no <View> wrappers)
+    // Render a single line as nested <Text>
     const renderLine = (line: string, idx: number, totalLines: number): React.ReactNode => {
         const isLast = idx === totalLines - 1;
         const lineBreak = isLast ? '' : '\n';
 
         if (line.trim() === '') {
-            return <Text key={`empty-${idx}`}>{'\n'}</Text>;
+            return (
+                <Text key={`empty-${idx}`} style={[styles.text, { color: colors.text }]}>
+                    {'\n'}
+                </Text>
+            );
         }
 
         // Headings
@@ -32,7 +34,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
             if (level >= 4) fontSize = 16;
 
             return (
-                <Text key={`h-${idx}`} style={{ fontSize, fontWeight: 'bold', letterSpacing: 0.2 }}>
+                <Text key={`h-${idx}`} style={[styles.text, { fontSize, fontWeight: 'bold', letterSpacing: 0.2, color: colors.text }]}>
                     <InlineText text={headingMatch[2]} />{lineBreak}
                 </Text>
             );
@@ -43,7 +45,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
         if (bulletMatch) {
             const indent = '  '.repeat(Math.floor(bulletMatch[1].length / 2));
             return (
-                <Text key={`b-${idx}`}>
+                <Text key={`b-${idx}`} style={[styles.text, { color: colors.text }]}>
                     {indent}{'•  '}<InlineText text={bulletMatch[3]} />{lineBreak}
                 </Text>
             );
@@ -54,7 +56,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
         if (numMatch) {
             const indent = '  '.repeat(Math.floor(numMatch[1].length / 2));
             return (
-                <Text key={`n-${idx}`}>
+                <Text key={`n-${idx}`} style={[styles.text, { color: colors.text }]}>
                     {indent}{numMatch[2]}{'  '}<InlineText text={numMatch[3]} />{lineBreak}
                 </Text>
             );
@@ -62,7 +64,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
 
         // Normal text
         return (
-            <Text key={`t-${idx}`}>
+            <Text key={`t-${idx}`} style={[styles.text, { color: colors.text }]}>
                 <InlineText text={line} />{lineBreak}
             </Text>
         );
@@ -72,9 +74,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ content }) => {
 
     return (
         <View style={styles.container}>
-            <Text selectable style={[styles.text, { color: colors.text }]}>
-                {lines.map((line, idx) => renderLine(line, idx, lines.length))}
-            </Text>
+            {lines.map((line, idx) => renderLine(line, idx, lines.length))}
         </View>
     );
 };
@@ -86,17 +86,6 @@ const styles = StyleSheet.create({
     text: {
         fontSize: 15,
         lineHeight: 22,
-    },
-    inlineCode: {
-        fontFamily: 'monospace',
-        fontSize: 13,
-        paddingHorizontal: 4,
-        borderRadius: 4,
-        overflow: 'hidden',
-    },
-    link: {
-        color: '#58A6FF',
-        textDecorationLine: 'underline',
     },
 });
 

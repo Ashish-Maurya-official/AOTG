@@ -135,6 +135,8 @@ interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
     attachment?: Attachment;
+    modelName?: string;
+    backend?: string;
 }
 
 // --- Memoized Chat Message Item ---
@@ -142,6 +144,7 @@ interface ChatMessage {
 interface ChatMessageItemProps {
     msg: ChatMessage;
     modelName: string;
+    backendName?: string;
     colors: any;
     copiedMessageId: string | null;
     isGenerating: boolean;
@@ -156,6 +159,7 @@ interface ChatMessageItemProps {
 const ChatMessageItem = memo(({
     msg,
     modelName,
+    backendName,
     colors,
     copiedMessageId,
     isGenerating,
@@ -167,6 +171,8 @@ const ChatMessageItem = memo(({
     showThinking,
 }: ChatMessageItemProps) => {
     const isCopied = copiedMessageId === msg.id;
+    const displayModelName = msg.modelName || modelName;
+    const displayBackendName = msg.backend || backendName || 'GPU';
 
     return (
         <View>
@@ -181,7 +187,7 @@ const ChatMessageItem = memo(({
                     <View style={styles.assistantHeader}>
                         <View style={[styles.activeDot, { backgroundColor: colors.text }]} />
                         <Text style={[styles.assistantModelTag, { color: colors.text }]}>
-                            {modelName} (On-Device)
+                            {displayModelName} ({displayBackendName})
                         </Text>
                     </View>
                 )}
@@ -278,6 +284,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const preferredBackend = useSelector(
         (state: RootState) => state.llm.preferredBackend
     );
+    const activeBackend = useSelector(
+        (state: RootState) => state.llm.activeBackend
+    );
     const customModels = useSelector(
         (state: RootState) => state.llm.customModels
     );
@@ -333,6 +342,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             AVAILABLE_MODELS[0],
         [selectedModelId, allModels]
     );
+
+    const currentBackendName = useMemo(() => {
+        if (activeBackend) return activeBackend;
+        if (preferredBackend && preferredBackend !== 'AUTO') return preferredBackend;
+        if (selectedModel?.supportedBackends?.length) return selectedModel.supportedBackends[0];
+        return 'GPU';
+    }, [activeBackend, preferredBackend, selectedModel]);
 
     // Stable refs for handlers used inside the key listener so the
     // effect never needs to re-register when these callbacks change.
@@ -563,6 +579,15 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
     const closeModelSelector = useCallback(() => {
         setIsModelModalVisible(false);
+    }, []);
+
+    const openDrawer = useCallback(() => {
+        dismissKeyboard();
+        setIsDrawerVisible(true);
+    }, [dismissKeyboard]);
+
+    const closeDrawer = useCallback(() => {
+        setIsDrawerVisible(false);
     }, []);
 
     const handleSelectModel = useCallback(
@@ -972,7 +997,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
             setMessages((prev) => [
                 ...prev,
-                { id: assistantMsgId, role: 'assistant', text: response },
+                {
+                    id: assistantMsgId,
+                    role: 'assistant',
+                    text: response,
+                    modelName: selectedModel.name,
+                    backend: currentBackendName,
+                },
             ]);
         } catch (err: any) {
             console.error('[HomePage] Generation error:', err);
@@ -984,6 +1015,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     text:
                         streamedText ||
                         'Error: Could not generate a response on device. Please try again.',
+                    modelName: selectedModel.name,
+                    backend: currentBackendName,
                 },
             ]);
         }
@@ -1004,6 +1037,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         streamedText,
         dispatch,
         preferredBackend,
+        currentBackendName,
         animateInputHeight,
     ]);
 
@@ -1053,7 +1087,13 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             const response = await generate(userMsg.text);
             setMessages((prev) => [
                 ...prev,
-                { id: newAssistantId, role: 'assistant', text: response },
+                {
+                    id: newAssistantId,
+                    role: 'assistant',
+                    text: response,
+                    modelName: selectedModel.name,
+                    backend: currentBackendName,
+                },
             ]);
         } catch (err: any) {
             console.error('[HomePage] Regenerate error:', err);
@@ -1063,10 +1103,12 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     id: newAssistantId,
                     role: 'assistant',
                     text: streamedText || 'Error: Could not regenerate the response. Please try again.',
+                    modelName: selectedModel.name,
+                    backend: currentBackendName,
                 },
             ]);
         }
-    }, [isGenerating, messages, generate, streamedText]);
+    }, [isGenerating, messages, generate, streamedText, selectedModel.name, currentBackendName]);
 
     const handleEditMessage = useCallback((msgId: string, text: string) => {
         // Store the message ID — truncation happens on Send
@@ -1120,11 +1162,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         <View style={styles.headerLeft}>
                             <Pressable
                                 style={styles.headerButton}
-                                onPress={() => {
-                                    console.log('Hamburger Menu Pressed!');
-                                    dismissKeyboard();
-                                    setIsDrawerVisible(true);
-                                }}>
+                                onPress={openDrawer}>
                                 <MenuIcon color={colors.text} />
                             </Pressable>
                             <Text style={[styles.headerTitle, { color: colors.text }]}>
@@ -1213,6 +1251,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         key={msg.id}
                                         msg={msg}
                                         modelName={selectedModel.name}
+                                        backendName={currentBackendName}
                                         colors={colors}
                                         copiedMessageId={copiedMessageId}
                                         isGenerating={isGenerating}
@@ -1277,7 +1316,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                 borderRadius: borderRadiusAnim,
                                 backgroundColor: colors.card,
                                 borderColor: colors.border,
-                                bottom: insets.bottom,
+                                bottom: insets.bottom + 10,
                                 alignSelf: 'center',
                             },
                         ]}>
@@ -1511,9 +1550,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             {/* Drawer Menu */}
             <DrawerMenu
                 isVisible={isDrawerVisible}
-                onClose={() => setIsDrawerVisible(false)}
+                onClose={closeDrawer}
                 onOpenAgent={onOpenAgent}
                 onNewChat={handleNewChat}
+                onOpenModelSelector={openModelSelector}
             />
 
             {/* Fullscreen Image Preview Modal */}
@@ -1759,7 +1799,7 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         minHeight: INPUT_HEIGHT_NORMAL,
-        justifyContent: 'center'
+        justifyContent: 'center',
     },
     input: {
         flex: 1,

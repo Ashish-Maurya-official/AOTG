@@ -1,12 +1,43 @@
-import React from 'react';
-import { Text, StyleSheet, Linking } from 'react-native';
+import React, { useCallback } from 'react';
+import { Text, StyleSheet, Linking, Platform } from 'react-native';
 import { useTheme } from '../../theme/ThemeProvider';
 
+const formatMathText = (content: string): string => {
+    return content
+        .replace(/\\rightarrow/g, '→')
+        .replace(/\\leftarrow/g, '←')
+        .replace(/\\le(q)?\b/g, '≤')
+        .replace(/\\ge(q)?\b/g, '≥')
+        .replace(/\\ne(q)?\b/g, '≠')
+        .replace(/\\approx/g, '≈')
+        .replace(/\\times/g, '×')
+        .replace(/\\cdot/g, '·')
+        .replace(/\\pm/g, '±')
+        .replace(/\\infty/g, '∞')
+        .replace(/\\sqrt/g, '√')
+        .replace(/\\(log|ln|max|min|sin|cos|tan)\b/g, '$1');
+};
+
 export const InlineText = ({ text }: { text: string }) => {
-    const { colors } = useTheme();
+    const { colors, mode } = useTheme();
+
+    // Warm yellowish / amber color for formulas, identical to GPT / Gemini math highlighting
+    const formulaColor = mode === 'dark' ? '#FBBF24' : '#D97706';
+    const linkColor = mode === 'dark' ? '#58A6FF' : '#0969DA';
+
+    const handleOpenUrl = useCallback((rawUrl: string) => {
+        let url = rawUrl.trim();
+        // Ensure scheme is present so Android can resolve browser activity
+        if (!/^https?:\/\//i.test(url) && !/^(mailto|tel):/i.test(url)) {
+            url = `https://${url}`;
+        }
+        Linking.openURL(url).catch((err) => {
+            console.warn('[InlineText] Failed to open URL:', url, err);
+        });
+    }, []);
 
     // Order matters: strikethrough, bold, italic, code, math, markdown link, bare URL
-    const parts = text.split(/(~~.*?~~|\*\*.*?\*\*|\*[^\*]+\*|`.*?`|\$[\s\S]*?\$|\[.*?\]\(.*?\)|https?:\/\/\S+)/g);
+    const parts = text.split(/(~~.*?~~|\*\*.*?\*\*|\*[^\*]+\*|`.*?`|\$[\s\S]*?\$|\[.*?\]\(.*?\)|https?:\/\/\S+|www\.\S+)/g);
 
     return (
         <>
@@ -19,36 +50,59 @@ export const InlineText = ({ text }: { text: string }) => {
                         </Text>
                     );
                 }
-                // Bold **text**
+                // Bold **text** (handles nested math like **$O(\log N)$**)
                 if (part.startsWith('**') && part.endsWith('**')) {
+                    const inner = part.slice(2, -2);
+                    if (inner.startsWith('$') && inner.endsWith('$') && inner.length > 2) {
+                        const mathContent = formatMathText(inner.slice(1, -1));
+                        return (
+                            <Text
+                                key={index}
+                                style={[styles.formula, { color: formulaColor, fontWeight: 'bold' }]}>
+                                {mathContent}
+                            </Text>
+                        );
+                    }
                     return (
                         <Text key={index} style={{ fontWeight: 'bold' }}>
-                            {part.slice(2, -2)}
+                            {inner}
                         </Text>
                     );
                 }
-                // Italic *text*
+                // Italic *text* (handles nested math like *$O(N)$*)
                 if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+                    const inner = part.slice(1, -1);
+                    if (inner.startsWith('$') && inner.endsWith('$') && inner.length > 2) {
+                        const mathContent = formatMathText(inner.slice(1, -1));
+                        return (
+                            <Text
+                                key={index}
+                                style={[styles.formula, { color: formulaColor }]}>
+                                {mathContent}
+                            </Text>
+                        );
+                    }
                     return (
                         <Text key={index} style={{ fontStyle: 'italic' }}>
-                            {part.slice(1, -1)}
+                            {inner}
                         </Text>
                     );
                 }
                 // Inline code `text`
                 if (part.startsWith('`') && part.endsWith('`')) {
                     return (
-                        <Text key={index} style={[styles.inlineCode, { backgroundColor: colors.border }]}>
+                        <Text key={index} style={[styles.inlineCode, { backgroundColor: colors.border, color: colors.text }]}>
                             {part.slice(1, -1)}
                         </Text>
                     );
                 }
-                // Inline math $text$
+                // Inline math / formula $text$
                 if (part.startsWith('$') && part.endsWith('$')) {
-                    let mathContent = part.slice(1, -1);
-                    mathContent = mathContent.replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←').replace(/\\log/g, 'log');
+                    const mathContent = formatMathText(part.slice(1, -1));
                     return (
-                        <Text key={index} style={{ fontStyle: 'italic', color: '#10A37F', fontWeight: '500' }}>
+                        <Text
+                            key={index}
+                            style={[styles.formula, { color: formulaColor }]}>
                             {mathContent}
                         </Text>
                     );
@@ -59,20 +113,22 @@ export const InlineText = ({ text }: { text: string }) => {
                     return (
                         <Text
                             key={index}
-                            onPress={() => Linking.openURL(linkMatch[2]).catch(() => {})}
-                            style={styles.link}>
+                            onPress={() => handleOpenUrl(linkMatch[2])}
+                            suppressHighlighting={false}
+                            style={[styles.link, { color: linkColor }]}>
                             {linkMatch[1]}
                         </Text>
                     );
                 }
-                // Bare URL https://...
-                if (/^https?:\/\/\S+$/.test(part)) {
+                // Bare URL https://... or www....
+                if (/^(https?:\/\/|www\.)\S+$/i.test(part)) {
                     const url = part.replace(/[.,;:!?)]+$/, '');
                     return (
                         <Text
                             key={index}
-                            onPress={() => Linking.openURL(url).catch(() => {})}
-                            style={styles.link}>
+                            onPress={() => handleOpenUrl(url)}
+                            suppressHighlighting={false}
+                            style={[styles.link, { color: linkColor }]}>
                             {url}
                         </Text>
                     );
@@ -88,14 +144,20 @@ export const InlineText = ({ text }: { text: string }) => {
 
 const styles = StyleSheet.create({
     inlineCode: {
-        fontFamily: 'monospace',
+        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
         fontSize: 13,
         paddingHorizontal: 4,
         borderRadius: 4,
         overflow: 'hidden',
     },
+    formula: {
+        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+        fontStyle: 'italic',
+        fontWeight: '500',
+        letterSpacing: 0.2,
+    },
     link: {
-        color: '#58A6FF',
         textDecorationLine: 'underline',
+        fontWeight: '500',
     },
 });
