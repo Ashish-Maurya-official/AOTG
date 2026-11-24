@@ -55,6 +55,16 @@ import {
     loadCustomModels,
     removeCustomModelStorage,
 } from '../../services/modelStorageService';
+import {
+    Attachment,
+    ChatMessage,
+    ChatSession,
+    loadSessions,
+    saveSession,
+    loadActiveSessionId,
+    saveActiveSessionId,
+    createSession,
+} from '../../services/chatStorageService';
 import { findMatchingCatalogModel } from '../../utils/modelMatching';
 import MessageRenderer from '../../components/MessageBlocks/MessageRenderer';
 import DrawerMenu from '../../components/DrawerMenu';
@@ -72,7 +82,7 @@ import ShareIcon from '../../static/images/SVG/ShareIcon';
 import EditIcon from '../../static/images/SVG/EditIcon';
 import Clipboard from '@react-native-clipboard/clipboard';
 import KeyEvent from 'react-native-keyevent';
-import { MenuIcon, ChevronDownIcon, RobotIcon, PlusIcon, StopIcon, CloseIcon, FileIcon, ThinkingIcon } from '../../components/SharedIcons';
+import { MenuIcon, ChevronDownIcon, PlusIcon, StopIcon, CloseIcon, FileIcon, ThinkingIcon } from '../../components/SharedIcons';
 
 const { width, height: windowHeight } = Dimensions.get('window');
 
@@ -108,36 +118,7 @@ const INPUT_HEIGHT_NORMAL = 40.5;
 const INPUT_HEIGHT_WITH_PREVIEW = 130;
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
 const SUPPORTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
-const SUPPORTED_DOC_TYPES = [
-    'application/pdf',
-    'text/plain',
-    'text/csv',
-    'text/markdown',
-    'text/html',
-    'application/json',
-    'message/rfc822',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-];
-const ALL_SUPPORTED_TYPES = [...SUPPORTED_IMAGE_TYPES, ...SUPPORTED_DOC_TYPES];
 const SUPPORTED_AUDIO_TYPES = ['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/ogg', 'audio/aac', 'audio/flac', 'audio/x-wav', 'audio/mp4'];
-
-interface Attachment {
-    uri: string;
-    name: string;
-    type: string;
-    size?: number;
-}
-
-interface ChatMessage {
-    id: string;
-    role: 'user' | 'assistant';
-    text: string;
-    attachment?: Attachment;
-    modelName?: string;
-    backend?: string;
-}
 
 // --- Memoized Chat Message Item ---
 // Extracted so completed messages don't re-render during streaming.
@@ -268,7 +249,7 @@ const ChatMessageItem = memo(({
 // --- Memoized Custom Vector Icons ---
 // (Moved to SharedIcons.tsx)
 
-const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
+const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; onOpenSettings?: () => void }) => {
     const theme = useTheme();
     const { colors } = theme;
     const insets = useSafeAreaInsets();
@@ -300,12 +281,33 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
     const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
     const [isPlusMenuVisible, setIsPlusMenuVisible] = useState(false);
     const [useThinking, setUseThinking] = useState(false);
-    const [showStopButton, setShowStopButton] = useState(false);
+    const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+    const activeSessionIdRef = useRef<string | null>(null);
+    activeSessionIdRef.current = activeSessionId;
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
     const [isMultiline, setIsMultiline] = useState(false);
     const [isProcessingDocument, setIsProcessingDocument] = useState(false);
-    const [documentProgressMessage, setDocumentProgressMessage] = useState<string>('');
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+
+    // Hydrate persisted active session messages on app start
+    useEffect(() => {
+        let isCancelled = false;
+        (async () => {
+            const savedActiveId = await loadActiveSessionId();
+            if (savedActiveId && !isCancelled) {
+                const all = await loadSessions();
+                const session = all.find((s) => s.id === savedActiveId);
+                if (session && session.messages?.length > 0 && !isCancelled) {
+                    setActiveSessionId(session.id);
+                    activeSessionIdRef.current = session.id;
+                    setMessages(session.messages);
+                }
+            }
+        })();
+        return () => {
+            isCancelled = true;
+        };
+    }, []);
 
     // Re-entrancy guard: prevents two rapid messages from both triggering
     // auto-load concurrently (the native side rejects with ERR_BUSY but the
@@ -603,6 +605,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         if (isGenerating) {
             await stopGeneration().catch(() => { });
         }
+        setActiveSessionId(null);
+        activeSessionIdRef.current = null;
+        await saveActiveSessionId(null);
         setMessages([]);
         setInputText('');
         setIsMultiline(false);
@@ -613,6 +618,42 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         }
     }, [isGenerating, stopGeneration, currentStatus, inputHeightAnim]);
 
+    const handleSelectSession = useCallback(async (sessionId: string) => {
+        if (isGenerating) {
+            await stopGeneration().catch(() => { });
+        }
+        if (currentStatus === 'loaded') {
+            await LLMService.resetConversation();
+        }
+        const all = await loadSessions();
+        const found = all.find((s) => s.id === sessionId);
+        if (found) {
+            setActiveSessionId(found.id);
+            activeSessionIdRef.current = found.id;
+            await saveActiveSessionId(found.id);
+            setMessages(found.messages || []);
+            setInputText('');
+            setPendingAttachment(null);
+            inputHeightAnim.setValue(INPUT_HEIGHT_NORMAL);
+        }
+        closeDrawer();
+    }, [isGenerating, stopGeneration, currentStatus, closeDrawer, inputHeightAnim]);
+
+    const handleDeleteSession = useCallback(async (sessionId: string) => {
+        if (activeSessionIdRef.current === sessionId) {
+            setActiveSessionId(null);
+            activeSessionIdRef.current = null;
+            await saveActiveSessionId(null);
+            setMessages([]);
+            setInputText('');
+            setPendingAttachment(null);
+            inputHeightAnim.setValue(INPUT_HEIGHT_NORMAL);
+            if (currentStatus === 'loaded') {
+                await LLMService.resetConversation();
+            }
+        }
+    }, [currentStatus, inputHeightAnim]);
+
     // --- Attachment Handlers ---
     const animateInputHeight = useCallback((toValue: number) => {
         Animated.timing(inputHeightAnim, {
@@ -621,6 +662,43 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             useNativeDriver: false,
         }).start();
     }, [inputHeightAnim]);
+
+    const handleMicPress = useCallback(async () => {
+        if (isGenerating) return;
+
+        if (selectedModel?.supportsAudio) {
+            try {
+                const [pickResult] = await pick({
+                    type: [DocumentPickerTypes.audio],
+                    copyTo: 'cachesDirectory',
+                });
+                if (pickResult?.uri) {
+                    const localUri = pickResult.uri.startsWith('file://') ? pickResult.uri : `file://${pickResult.uri}`;
+                    setPendingAttachment({
+                        uri: localUri,
+                        name: pickResult.name || 'Audio Recording',
+                        type: pickResult.type || 'audio/wav',
+                        size: pickResult.size ?? undefined,
+                    });
+                    animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
+                }
+            } catch (err: any) {
+                if (!isErrorWithCode(err) || err.code !== errorCodes.OPERATION_CANCELED) {
+                    console.error('[HomePage] Audio pick error:', err);
+                    Alert.alert('Audio Error', 'Failed to select audio file.');
+                }
+            }
+        } else {
+            Alert.alert(
+                'Audio Not Supported',
+                `"${selectedModel.name}" is a text model and does not process direct audio input.\n\nTo use audio input, select an audio-capable model (such as Gemma 4) in the model selector.`,
+                [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Select Model', onPress: openModelSelector },
+                ]
+            );
+        }
+    }, [isGenerating, selectedModel, animateInputHeight, openModelSelector]);
 
     useEffect(() => {
         Animated.timing(borderRadiusAnim, {
@@ -782,51 +860,91 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
 
         setMessages((prev) => [...prev, userMessage]);
 
+        // Persist user message into active or newly created session
+        let currentSession: ChatSession;
+        const currentActiveId = activeSessionIdRef.current;
+        if (!currentActiveId) {
+            currentSession = createSession(userMessage, selectedModel.name, currentBackendName);
+            setActiveSessionId(currentSession.id);
+            activeSessionIdRef.current = currentSession.id;
+            await saveActiveSessionId(currentSession.id);
+            await saveSession(currentSession);
+        } else {
+            const all = await loadSessions();
+            const existing = all.find((s) => s.id === currentActiveId);
+            if (existing) {
+                let updatedMsgs: ChatMessage[];
+                if (editId) {
+                    const idx = existing.messages.findIndex((m) => m.id === editId);
+                    const base = idx >= 0 ? existing.messages.slice(0, idx) : existing.messages;
+                    updatedMsgs = [...base, userMessage];
+                } else {
+                    updatedMsgs = [...existing.messages, userMessage];
+                }
+                existing.messages = updatedMsgs;
+                existing.updatedAt = Date.now();
+                if (existing.title === 'New Chat' || !existing.title) {
+                    if (userMessage.text && userMessage.text.trim().length > 0) {
+                        const trimmed = userMessage.text.trim();
+                        existing.title = trimmed.length > 32 ? `${trimmed.substring(0, 32)}...` : trimmed;
+                    } else if (userMessage.attachment?.name) {
+                        existing.title = userMessage.attachment.name;
+                    }
+                }
+                currentSession = existing;
+                await saveSession(existing);
+            } else {
+                currentSession = createSession(userMessage, selectedModel.name, currentBackendName);
+                setActiveSessionId(currentSession.id);
+                activeSessionIdRef.current = currentSession.id;
+                await saveActiveSessionId(currentSession.id);
+                await saveSession(currentSession);
+            }
+        }
+
+        const appendAssistantMessage = async (msgText: string, customId?: string) => {
+            const msg: ChatMessage = {
+                id: customId || assistantMsgId,
+                role: 'assistant',
+                text: msgText,
+                modelName: selectedModel.name,
+                backend: currentBackendName,
+            };
+            if (activeSessionIdRef.current === currentSession?.id) {
+                setMessages((prev) => [...prev, msg]);
+            }
+            if (currentSession) {
+                currentSession.messages = [...currentSession.messages, msg];
+                currentSession.updatedAt = Date.now();
+                await saveSession(currentSession);
+            }
+        };
+
         if (selectedModel.isEmbedding) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" is an embedding model used for feature extraction, not a conversational assistant. It does not support standard chat.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" is an embedding model used for feature extraction, not a conversational assistant. It does not support standard chat.`
+            );
             return;
         }
 
         if (selectedModel.isASR || selectedModel.isOCR) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" is an Audio/Image recognition model, not a conversational language model. It cannot be used for chat.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" is an Audio/Image recognition model, not a conversational language model. It cannot be used for chat.`
+            );
             return;
         }
 
         if (selectedModel.isExperimental) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" uses an experimental multi-prefill architecture which is not currently supported by the stable on-device engine.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" uses an experimental multi-prefill architecture which is not currently supported by the stable on-device engine.`
+            );
             return;
         }
 
         if (selectedModel.isDraftModel) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" is a draft model designed for speculative decoding and is not intended for standalone conversational chat.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" is a draft model designed for speculative decoding and is not intended for standalone conversational chat.`
+            );
             return;
         }
 
@@ -837,26 +955,16 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         const modelSupportsAudio = !!selectedModel.supportsAudio;
 
         if (isImageAttachment && !modelSupportsVision) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" doesn't support image input. Please select a vision-capable model to process images, or send a text-only message.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" doesn't support image input. Please select a vision-capable model to process images, or send a text-only message.`
+            );
             return;
         }
 
         if (isAudioAttachment && !modelSupportsAudio) {
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: `"${selectedModel.name}" doesn't support audio input. Please select an audio-capable model (e.g. Gemma 4) to process audio files, or send a text-only message.`,
-                },
-            ]);
+            await appendAssistantMessage(
+                `"${selectedModel.name}" doesn't support audio input. Please select an audio-capable model (e.g. Gemma 4) to process audio files, or send a text-only message.`
+            );
             return;
         }
 
@@ -865,25 +973,15 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         // instead of trying (and failing) to initialize a missing file.
         if (currentStatus !== 'loaded') {
             if (currentStatus === 'loading' || isAutoLoadingRef.current) {
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: assistantMsgId,
-                        role: 'assistant',
-                        text: `"${selectedModel.name}" is still loading. Please wait a moment and send your message again.`,
-                    },
-                ]);
+                await appendAssistantMessage(
+                    `"${selectedModel.name}" is still loading. Please wait a moment and send your message again.`
+                );
                 return;
             }
             if (currentStatus !== 'downloaded') {
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: assistantMsgId,
-                        role: 'assistant',
-                        text: `"${selectedModel.name}" isn't downloaded yet. Open the model selector (top-right) to download and load it before chatting.`,
-                    },
-                ]);
+                await appendAssistantMessage(
+                    `"${selectedModel.name}" isn't downloaded yet. Open the model selector (top-right) to download and load it before chatting.`
+                );
                 setIsModelModalVisible(true);
                 return;
             }
@@ -907,14 +1005,9 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                         error: loadErr?.message || 'Failed to load model',
                     })
                 );
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: assistantMsgId,
-                        role: 'assistant',
-                        text: `Could not load ${selectedModel.name}: ${loadErr?.message || 'initialization failed'}. Try a different acceleration backend, or re-download the model from the selector.`,
-                    },
-                ]);
+                await appendAssistantMessage(
+                    `Could not load ${selectedModel.name}: ${loadErr?.message || 'initialization failed'}. Try a different acceleration backend, or re-download the model from the selector.`
+                );
                 return;
             } finally {
                 isAutoLoadingRef.current = false;
@@ -926,14 +1019,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             const promptText = query || (attachment ? `[Image: ${attachment.name}]` : '');
             const wasReset = await LLMService.ensureContextBudget(estimateTokens(promptText));
             if (wasReset) {
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: `${assistantMsgId}-ctx`,
-                        role: 'assistant',
-                        text: '_Context window was full — earlier messages are no longer visible to the model._',
-                    },
-                ]);
+                await appendAssistantMessage(
+                    '_Context window was full — earlier messages are no longer visible to the model._',
+                    `${assistantMsgId}-ctx`
+                );
             }
 
             let response: string;
@@ -954,11 +1043,8 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
             } else if (attachment && !isImageAttachment && !isAudioAttachment) {
                 // Document processing path
                 setIsProcessingDocument(true);
-                setDocumentProgressMessage('Processing document...');
 
-                const unsubscribe = documentService.onProgress((event) => {
-                    setDocumentProgressMessage(event.message);
-                });
+                const unsubscribe = documentService.onProgress(() => {});
 
                 try {
                     const filePath = attachment.uri.replace('file://', '');
@@ -966,10 +1052,10 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     unsubscribe();
 
                     if (docResult.warnings && docResult.warnings.length > 0) {
-                        setMessages((prev) => [
-                            ...prev,
-                            { id: `${assistantMsgId}-warn`, role: 'assistant', text: `_Note: ${docResult.warnings.join(', ')}_` }
-                        ]);
+                        await appendAssistantMessage(
+                            `_Note: ${docResult.warnings.join(', ')}_`,
+                            `${assistantMsgId}-warn`
+                        );
                     }
 
                     const maxTokens = 2000; // Leave room for response
@@ -988,49 +1074,28 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     throw new Error(`Failed to process document: ${docErr.message}`);
                 } finally {
                     setIsProcessingDocument(false);
-                    setDocumentProgressMessage('');
                 }
             } else {
                 // Text-only path (existing flow)
                 response = await generate(queryForModel);
             }
 
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text: response,
-                    modelName: selectedModel.name,
-                    backend: currentBackendName,
-                },
-            ]);
+            await appendAssistantMessage(response);
         } catch (err: any) {
             console.error('[HomePage] Generation error:', err);
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: assistantMsgId,
-                    role: 'assistant',
-                    text:
-                        streamedText ||
-                        'Error: Could not generate a response on device. Please try again.',
-                    modelName: selectedModel.name,
-                    backend: currentBackendName,
-                },
-            ]);
+            await appendAssistantMessage(
+                streamedText || 'Error: Could not generate a response on device. Please try again.'
+            );
         }
     }, [
         inputText,
         pendingAttachment,
         isGenerating,
         currentStatus,
+        modelStatuses,
+        selectedModel,
+        useThinking,
         loadModel,
-        selectedModel.fileName,
-        selectedModel.id,
-        selectedModel.name,
-        selectedModel.supportsVision,
-        selectedModel.supportsAudio,
         generate,
         generateWithVision,
         generateWithAudio,
@@ -1075,40 +1140,61 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         if (!userMsg) return;
 
         // Remove this assistant message and everything after it
-        setMessages((prev) => {
-            const idx = prev.findIndex((m) => m.id === msgId);
-            if (idx < 0) return prev;
-            return prev.slice(0, idx);
-        });
+        const remainingMessages = messages.slice(0, msgIndex);
+        setMessages(remainingMessages);
 
+        // Reset conversation on native engine so KV cache rewinds
+        if (currentStatus === 'loaded') {
+            await LLMService.resetConversation();
+        }
+
+        const regenerateSessionId = activeSessionIdRef.current;
         // Re-generate using the original user query
         const newAssistantId = Date.now().toString();
         try {
             const response = await generate(userMsg.text);
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: newAssistantId,
-                    role: 'assistant',
-                    text: response,
-                    modelName: selectedModel.name,
-                    backend: currentBackendName,
-                },
-            ]);
+            const newAssistantMsg: ChatMessage = {
+                id: newAssistantId,
+                role: 'assistant',
+                text: response,
+                modelName: selectedModel.name,
+                backend: currentBackendName,
+            };
+            if (activeSessionIdRef.current === regenerateSessionId) {
+                setMessages((prev) => [...prev, newAssistantMsg]);
+            }
+            if (regenerateSessionId) {
+                const all = await loadSessions();
+                const session = all.find((s) => s.id === regenerateSessionId);
+                if (session) {
+                    session.messages = [...remainingMessages, newAssistantMsg];
+                    session.updatedAt = Date.now();
+                    await saveSession(session);
+                }
+            }
         } catch (err: any) {
             console.error('[HomePage] Regenerate error:', err);
-            setMessages((prev) => [
-                ...prev,
-                {
-                    id: newAssistantId,
-                    role: 'assistant',
-                    text: streamedText || 'Error: Could not regenerate the response. Please try again.',
-                    modelName: selectedModel.name,
-                    backend: currentBackendName,
-                },
-            ]);
+            const errorMsg: ChatMessage = {
+                id: newAssistantId,
+                role: 'assistant',
+                text: streamedText || 'Error: Could not regenerate the response. Please try again.',
+                modelName: selectedModel.name,
+                backend: currentBackendName,
+            };
+            if (activeSessionIdRef.current === regenerateSessionId) {
+                setMessages((prev) => [...prev, errorMsg]);
+            }
+            if (regenerateSessionId) {
+                const all = await loadSessions();
+                const session = all.find((s) => s.id === regenerateSessionId);
+                if (session) {
+                    session.messages = [...remainingMessages, errorMsg];
+                    session.updatedAt = Date.now();
+                    await saveSession(session);
+                }
+            }
         }
-    }, [isGenerating, messages, generate, streamedText, selectedModel.name, currentBackendName]);
+    }, [isGenerating, messages, currentStatus, generate, streamedText, selectedModel.name, currentBackendName]);
 
     const handleEditMessage = useCallback((msgId: string, text: string) => {
         // Store the message ID — truncation happens on Send
@@ -1123,15 +1209,6 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
         [insets.top]
     );
 
-    const bottomBarStyle = useMemo(
-        () => [styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) }],
-        [insets.bottom]
-    );
-
-    const robotBgColor = colors.robotBg || '#262831';
-    const robotIconColor = colors.robotIcon || '#2DD4BF';
-    const headphoneBgColor = colors.headphoneBg || '#FFF';
-    const headphoneIconColor = colors.headphoneIcon || '#000000';
     const secondaryTextColor = colors.secondaryText || '#9E9EA8';
 
     const isDark = theme.mode === 'dark';
@@ -1198,29 +1275,30 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                     {/* Main Body: Empty State or Active Conversation */}
                     {!hasMessages ? (
                         <View style={[styles.centerContent, { flex: 1 }]}>
-                            {/* Robot Avatar Badge */}
+                            {/* Sovereign AOTG Master Brandmark */}
                             <View
                                 style={[
                                     styles.avatarCircle,
-                                    { backgroundColor: robotBgColor },
+                                    { backgroundColor: colors.card, borderColor: colors.border },
                                 ]}>
-                                <RobotIcon
-                                    color={robotIconColor}
-                                    bgColor={robotBgColor}
+                                <Image
+                                    source={require('../../static/images/aotg_logo_256.png')}
+                                    style={styles.avatarImage}
+                                    resizeMode="contain"
                                 />
                             </View>
 
                             {/* Title & Subtitle */}
                             <Text style={[styles.title, { color: colors.text }]}>
-                                Ready to chat
+                                AOTG Sovereign Core
                             </Text>
                             <Text
                                 style={[
                                     styles.subtitle,
                                     { color: secondaryTextColor },
                                 ]}>
-                                Type a message or tap the mic to start a{'\n'}
-                                conversation with on-device AI.
+                                100% Zero-Cloud On-Device Intelligence{'\n'}
+                                Air-gapped neural inference with zero latency egress.
                             </Text>
                         </View>
                     ) : (
@@ -1437,7 +1515,7 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                                         </Reanimated.View>
                                     ) : (
                                         <Reanimated.View key="mic" entering={ZoomIn.duration(200)} exiting={ZoomOut.duration(200)} style={{ position: 'absolute', width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
-                                            <Pressable style={styles.iconButton}>
+                                            <Pressable onPress={handleMicPress} style={styles.iconButton}>
                                                 <MicIcon color={inactiveIconColor} size={18} />
                                             </Pressable>
                                         </Reanimated.View>
@@ -1552,8 +1630,12 @@ const HomePage = ({ onOpenAgent }: { onOpenAgent?: () => void }) => {
                 isVisible={isDrawerVisible}
                 onClose={closeDrawer}
                 onOpenAgent={onOpenAgent}
+                onOpenSettings={onOpenSettings}
                 onNewChat={handleNewChat}
                 onOpenModelSelector={openModelSelector}
+                activeSessionId={activeSessionId}
+                onSelectSession={handleSelectSession}
+                onDeleteSession={handleDeleteSession}
             />
 
             {/* Fullscreen Image Preview Modal */}
@@ -1675,9 +1757,15 @@ const styles = StyleSheet.create({
         width: 88,
         height: 88,
         borderRadius: 44,
+        borderWidth: 1,
         justifyContent: 'center',
         alignItems: 'center',
         marginBottom: 26,
+    },
+    avatarImage: {
+        width: 84,
+        height: 84,
+        borderRadius: 20,
     },
     title: {
         fontSize: 26,

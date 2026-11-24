@@ -1,15 +1,17 @@
 import React, {
   createContext,
   useContext,
+  useEffect,
   useMemo,
   ReactNode,
 } from 'react';
 import { useColorScheme } from 'react-native';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 
 import lightTheme from './lightTheme';
 import darkTheme from './darkTheme';
 import { RootState } from '../store/store';
+import { loadPersistedTheme, setTheme } from '../store/slices/themeSlice';
 
 export type ThemeType = typeof lightTheme;
 
@@ -20,10 +22,23 @@ interface ThemeProviderProps {
 }
 
 export const ThemeProvider = ({ children }: ThemeProviderProps) => {
+  const dispatch = useDispatch();
   const systemTheme = useColorScheme();
   const themeMode = useSelector(
     (state: RootState) => state.theme.themeMode
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    loadPersistedTheme().then((persisted) => {
+      if (!cancelled && persisted) {
+        dispatch(setTheme(persisted));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatch]);
 
   const theme = useMemo(() => {
     switch (themeMode) {

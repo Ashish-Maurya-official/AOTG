@@ -181,6 +181,17 @@ class LLMServiceImpl {
   }
 
   /**
+   * Return the absolute path of the local models directory on device.
+   */
+  public async getModelsDirectory(): Promise<string> {
+    try {
+      return await NativeLLM.getModelsDirectory();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
    * Load and initialize on-device LLM model weights with dynamic backend fallback
    */
   public async initialize(

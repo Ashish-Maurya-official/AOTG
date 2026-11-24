@@ -11,8 +11,9 @@ import {store} from './src/store/store';
 import {ThemeProvider} from './src/theme/ThemeProvider';
 import HomePage from './src/screens/HomePage/HomePage';
 import AgentPage from './src/screens/AgentPage/AgentPage';
+import SettingsPage from './src/screens/SettingsPage/SettingsPage';
 
-type Screen = 'home' | 'agent';
+type Screen = 'home' | 'agent' | 'settings';
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
@@ -20,6 +21,10 @@ function App() {
 
   const navigateToAgent = useCallback(() => {
     setCurrentScreen('agent');
+  }, []);
+
+  const navigateToSettings = useCallback(() => {
+    setCurrentScreen('settings');
   }, []);
 
   const navigateToHome = useCallback(() => {
@@ -34,9 +39,14 @@ function App() {
             barStyle={isDarkMode ? 'light-content' : 'dark-content'}
           />
           {currentScreen === 'home' ? (
-            <HomePage onOpenAgent={navigateToAgent} />
-          ) : (
+            <HomePage
+              onOpenAgent={navigateToAgent}
+              onOpenSettings={navigateToSettings}
+            />
+          ) : currentScreen === 'agent' ? (
             <AgentPage onBack={navigateToHome} />
+          ) : (
+            <SettingsPage onBack={navigateToHome} />
           )}
         </SafeAreaProvider>
       </ThemeProvider>

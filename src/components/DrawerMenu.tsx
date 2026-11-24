@@ -13,6 +13,8 @@ import {
     Platform,
     NativeModules,
     PanResponder,
+    Alert,
+    Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSelector, useDispatch } from 'react-redux';
@@ -24,6 +26,8 @@ import { RootState } from '../store/store';
 import { AVAILABLE_MODELS } from '../store/slices/llmSlice';
 import LLMService from '../services/llmService';
 import { PlusIcon, AgentIcon, CloseIcon } from './SharedIcons';
+import { ChatSession, loadSessions, deleteSession } from '../services/chatStorageService';
+import NativeMemory from '../native/turbo_modules/Memory/NativeMemory';
 
 // ── Tablet & Responsive Dimension Setup ─────────────────────────────
 const { width } = Dimensions.get('window');
@@ -50,19 +54,6 @@ const REAL_DEVICE_NAME = getDeviceName();
 const REAL_DEVICE_SUBTITLE = getDeviceSubtitle();
 
 // ── Vector Icons (Memoized) ──────────────────────────────────────────
-
-const NeuralBoltIcon = memo(({ color, size = 20 }: { color: string; size?: number }) => (
-    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-        <Path
-            d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"
-            fill={color}
-            stroke={color}
-            strokeWidth={1.5}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-        />
-    </Svg>
-));
 
 const ShieldCheckIcon = memo(({ color, size = 13 }: { color: string; size?: number }) => (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -148,7 +139,7 @@ const SettingsGearIcon = memo(({ color, size = 18 }: { color: string; size?: num
     </Svg>
 ));
 
-// ── Types & Chat History Mock Data (Kept Mocked as Explicitly Requested) ──
+// ── Types & Chat History Session Item ──────────────────────────────────
 
 interface ChatItemData {
     id: string;
@@ -157,24 +148,16 @@ interface ChatItemData {
     isActive?: boolean;
 }
 
-const TODAY_CHATS: ChatItemData[] = [
-    { id: '1', title: 'Optimizing React Native Shaders', time: '12m', isActive: true },
-    { id: '2', title: 'Local Audio Transcription Workflow', time: '2h' },
-    { id: '3', title: 'Summarize Technical Whitepaper', time: '5h' },
-];
-
-const PREVIOUS_CHATS: ChatItemData[] = [
-    { id: '4', title: 'Python Web Scraping Pipeline', time: '2d' },
-    { id: '5', title: 'Offline Translation — EN / JA', time: '4d' },
-    { id: '6', title: 'System Prompt Engineering Guide', time: '6d' },
-];
-
 export interface DrawerMenuProps {
     isVisible: boolean;
     onClose: () => void;
     onOpenAgent?: () => void;
+    onOpenSettings?: () => void;
     onNewChat?: () => void;
     onOpenModelSelector?: () => void;
+    activeSessionId?: string | null;
+    onSelectSession?: (sessionId: string) => void;
+    onDeleteSession?: (sessionId: string) => void;
 }
 
 // ── Real Hardware & Memory Telemetry State ──────────────────────────
@@ -196,12 +179,18 @@ interface DrawerChatItemProps {
     item: ChatItemData;
     colors: any;
     onPress: (id: string) => void;
+    onDelete?: (id: string, title: string) => void;
 }
 
-const DrawerChatItem = memo(({ item, colors, onPress }: DrawerChatItemProps) => {
+const DrawerChatItem = memo(({ item, colors, onPress, onDelete }: DrawerChatItemProps) => {
     const handlePress = useCallback(() => {
         onPress(item.id);
     }, [item.id, onPress]);
+
+    const handleDelete = useCallback((e: any) => {
+        e?.stopPropagation?.();
+        onDelete?.(item.id, item.title);
+    }, [item.id, item.title, onDelete]);
 
     return (
         <Pressable
@@ -229,6 +218,14 @@ const DrawerChatItem = memo(({ item, colors, onPress }: DrawerChatItemProps) => 
             <Text style={[styles.chatTime, { color: item.isActive ? colors.primary : colors.secondaryText }]}>
                 {item.time}
             </Text>
+            {onDelete && (
+                <Pressable
+                    hitSlop={8}
+                    onPress={handleDelete}
+                    style={styles.chatDeleteBtn}>
+                    <CloseIcon size={12} color={colors.secondaryText} />
+                </Pressable>
+            )}
         </Pressable>
     );
 });
@@ -254,14 +251,26 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
     isVisible,
     onClose,
     onOpenAgent,
+    onOpenSettings,
     onNewChat,
     onOpenModelSelector,
+    activeSessionId,
+    onSelectSession,
+    onDeleteSession,
 }) => {
     const theme = useTheme();
     const { colors, mode } = theme;
     const isDark = mode === 'dark';
     const insets = useSafeAreaInsets();
     const dispatch = useDispatch();
+
+    const [sessions, setSessions] = useState<ChatSession[]>([]);
+
+    useEffect(() => {
+        if (isVisible) {
+            loadSessions().then(setSessions);
+        }
+    }, [isVisible]);
 
     // ── Real Redux State for Models & Acceleration ───────────────────
     const selectedModelId = useSelector((state: RootState) => state.llm.selectedModelId);
@@ -329,18 +338,17 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
             let isLowMem = false;
             let fromNative = false;
 
-            // 1. Query real Android ActivityManager RAM via custom NativeModule
+            // 1. Query real Android ActivityManager RAM via custom NativeModule / TurboModule
             try {
-                const deviceMemoryModule = NativeModules.DeviceMemory;
-                if (deviceMemoryModule?.getMemoryInfo) {
-                    const memInfo = await deviceMemoryModule.getMemoryInfo();
-                    if (memInfo?.totalBytes > 0) {
-                        totalMemBytes = memInfo.totalBytes;
-                        availMemBytes = memInfo.availableBytes;
-                        usedMemBytes = memInfo.usedBytes;
-                        isLowMem = !!memInfo.isLowMemory;
-                        fromNative = true;
-                    }
+                const memInfo = NativeMemory?.getMemoryInfo
+                    ? await NativeMemory.getMemoryInfo()
+                    : await NativeModules.DeviceMemory?.getMemoryInfo?.();
+                if (memInfo && memInfo.totalBytes > 0) {
+                    totalMemBytes = memInfo.totalBytes;
+                    availMemBytes = memInfo.availableBytes;
+                    usedMemBytes = memInfo.usedBytes;
+                    isLowMem = !!memInfo.isLowMemory;
+                    fromNative = true;
                 }
             } catch {
                 // DeviceMemory not available (fallback gracefully)
@@ -580,12 +588,74 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
             enableVibrateFallback: true,
             ignoreAndroidSystemSettings: false,
         });
-        dispatch(toggleTheme());
-    }, [dispatch]);
+        dispatch(toggleTheme(isDark ? 'light' : 'dark'));
+    }, [dispatch, isDark]);
 
-    const handleSelectChat = useCallback((_id: string) => {
-        closeDrawer();
-    }, [closeDrawer]);
+    const handleSelectChat = useCallback((id: string) => {
+        closeDrawer(() => {
+            onSelectSession?.(id);
+        });
+    }, [closeDrawer, onSelectSession]);
+
+    const handleDeleteChat = useCallback((id: string, title: string) => {
+        Alert.alert(
+            'Delete Conversation',
+            `Are you sure you want to delete "${title}"?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                        await deleteSession(id);
+                        onDeleteSession?.(id);
+                        const updated = await loadSessions();
+                        setSessions(updated);
+                    },
+                },
+            ]
+        );
+    }, [onDeleteSession]);
+
+    const handleOpenSettings = useCallback(() => {
+        closeDrawer(() => {
+            onOpenSettings?.();
+        });
+    }, [closeDrawer, onOpenSettings]);
+
+    const { todayChats, previousChats } = useMemo(() => {
+        const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+        const formatTime = (timestamp: number): string => {
+            const diffMs = Math.max(0, Date.now() - timestamp);
+            const diffMins = Math.floor(diffMs / 60000);
+            if (diffMins < 60) return `${Math.max(1, diffMins)}m`;
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return `${diffHours}h`;
+            const diffDays = Math.floor(diffHours / 24);
+            return `${diffDays}d`;
+        };
+
+        const today: ChatItemData[] = [];
+        const previous: ChatItemData[] = [];
+
+        sessions.forEach((s) => {
+            const item: ChatItemData = {
+                id: s.id,
+                title: s.title || 'Untitled Chat',
+                time: formatTime(s.updatedAt || s.createdAt),
+                isActive: s.id === activeSessionId,
+            };
+            if ((s.updatedAt || s.createdAt) >= startOfToday) {
+                today.push(item);
+            } else {
+                previous.push(item);
+            }
+        });
+
+        return { todayChats: today, previousChats: previous };
+    }, [sessions, activeSessionId]);
 
     // ── Real Derived Backend Label & Status ───────────────────────────
     const realBackendTag = useMemo(() => {
@@ -646,7 +716,11 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
                         <View style={styles.brandRow}>
                             {/* Glowing Obsidian Neural Shield Badge */}
                             <View style={[styles.neuralBadge, { backgroundColor: colors.background, borderColor: colors.border }]}>
-                                <NeuralBoltIcon color={colors.primary} size={22} />
+                                <Image
+                                    source={require('../static/images/aotg_logo_128.png')}
+                                    style={styles.brandLogoImage}
+                                    resizeMode="contain"
+                                />
                                 <Animated.View
                                     style={[
                                         styles.neuralPulseDot,
@@ -763,32 +837,58 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
                         </View>
                     </View>
 
-                    {/* ── Center: Grouped Chat History (Mocked per request) ── */}
+                    {/* ── Center: Grouped Chat History ── */}
                     <ScrollView
                         style={styles.historyScrollView}
                         contentContainerStyle={styles.historyContentContainer}
                         showsVerticalScrollIndicator={false}>
-                        {/* Section: TODAY */}
-                        <SectionHeader title="TODAY" badge="3 SESSIONS" color={colors.secondaryText} />
-                        {TODAY_CHATS.map((chat) => (
-                            <DrawerChatItem
-                                key={chat.id}
-                                item={chat}
-                                colors={colors}
-                                onPress={handleSelectChat}
-                            />
-                        ))}
+                        {sessions.length === 0 ? (
+                            <View style={styles.emptyContainer}>
+                                <Text style={[styles.emptyHistoryText, { color: colors.secondaryText }]}>
+                                    No conversations yet. Start a chat to see history.
+                                </Text>
+                            </View>
+                        ) : (
+                            <>
+                                {todayChats.length > 0 && (
+                                    <>
+                                        <SectionHeader
+                                            title="TODAY"
+                                            badge={`${todayChats.length} SESSIONS`}
+                                            color={colors.secondaryText}
+                                        />
+                                        {todayChats.map((chat) => (
+                                            <DrawerChatItem
+                                                key={chat.id}
+                                                item={chat}
+                                                colors={colors}
+                                                onPress={handleSelectChat}
+                                                onDelete={handleDeleteChat}
+                                            />
+                                        ))}
+                                    </>
+                                )}
 
-                        {/* Section: PREVIOUS 7 DAYS */}
-                        <SectionHeader title="PREVIOUS 7 DAYS" badge="ARCHIVE" color={colors.secondaryText} />
-                        {PREVIOUS_CHATS.map((chat) => (
-                            <DrawerChatItem
-                                key={chat.id}
-                                item={chat}
-                                colors={colors}
-                                onPress={handleSelectChat}
-                            />
-                        ))}
+                                {previousChats.length > 0 && (
+                                    <>
+                                        <SectionHeader
+                                            title="PREVIOUS 7 DAYS"
+                                            badge={`${previousChats.length} SESSIONS`}
+                                            color={colors.secondaryText}
+                                        />
+                                        {previousChats.map((chat) => (
+                                            <DrawerChatItem
+                                                key={chat.id}
+                                                item={chat}
+                                                colors={colors}
+                                                onPress={handleSelectChat}
+                                                onDelete={handleDeleteChat}
+                                            />
+                                        ))}
+                                    </>
+                                )}
+                            </>
+                        )}
                     </ScrollView>
 
                     {/* ── Bottom Section: Real Telemetry & Hardware Footer ── */}
@@ -898,7 +998,7 @@ const DrawerMenu: React.FC<DrawerMenuProps> = ({
                                         { backgroundColor: colors.background, borderColor: colors.border },
                                         pressed ? styles.iconButtonPressed : undefined,
                                     ]}
-                                    onPress={handleClose}>
+                                    onPress={handleOpenSettings}>
                                     <SettingsGearIcon color={colors.text} size={17} />
                                 </Pressable>
                             </View>
@@ -954,6 +1054,11 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         position: 'relative',
+    },
+    brandLogoImage: {
+        width: 32,
+        height: 32,
+        borderRadius: 8,
     },
     neuralPulseDot: {
         position: 'absolute',
@@ -1324,6 +1429,25 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         alignItems: 'center',
         justifyContent: 'center',
+    },
+    chatDeleteBtn: {
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginLeft: 6,
+    },
+    emptyContainer: {
+        paddingVertical: 36,
+        paddingHorizontal: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    emptyHistoryText: {
+        fontSize: 13,
+        textAlign: 'center',
+        lineHeight: 18,
     },
 });
 
