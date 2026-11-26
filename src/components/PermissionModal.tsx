@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, View, Text, Pressable, StyleSheet, Animated } from 'react-native';
+import { Modal, View, Text, Pressable, StyleSheet } from 'react-native';
 import { useTheme } from '../theme/ThemeProvider';
 import DriveIcon from '../static/images/SVG/DriveIcon';
 
@@ -8,6 +8,7 @@ interface PermissionModalProps {
     title?: string;
     description?: string;
     isPermanentlyDenied?: boolean;
+    icon?: React.ReactNode;
     onGrant: () => void;
     onCancel: () => void;
 }
@@ -17,6 +18,7 @@ const PermissionModal: React.FC<PermissionModalProps> = ({
     title = 'Storage Permission Required',
     description = 'We need access to your device storage to import models or save downloaded files securely.',
     isPermanentlyDenied = false,
+    icon,
     onGrant,
     onCancel,
 }) => {
@@ -27,7 +29,7 @@ const PermissionModal: React.FC<PermissionModalProps> = ({
             <View style={styles.overlay}>
                 <View style={[styles.dialog, { backgroundColor: colors.card, borderColor: colors.border }]}>
                     <View style={[styles.iconContainer, { backgroundColor: 'rgba(128, 128, 128, 0.15)' }]}>
-                        <DriveIcon color={colors.text} size={32} />
+                        {icon ?? <DriveIcon color={colors.text} size={32} />}
                     </View>
                     <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
                     <Text style={[styles.description, { color: colors.secondaryText }]}>

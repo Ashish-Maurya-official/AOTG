@@ -32,7 +32,7 @@ export interface Spec extends TurboModule {
   importModelFile(contentUri: string, fileName: string): Promise<string>;
   getModelsDirectory(): Promise<string>;
 
-  initialize(modelPath: string, backend: string, isVision: boolean, maxContextLength: number): Promise<InitializeResult>;
+  initialize(modelPath: string, backend: string, isVision: boolean, isAudio: boolean, maxContextLength: number): Promise<InitializeResult>;
   /** Text-only generation */
   startGeneration(prompt: string): Promise<boolean>;
   /** Multimodal generation with optional image — imagePath is an absolute file path on device */

@@ -11,7 +11,7 @@ export interface UseLLMReturn {
   activeBackend: string | null;
   streamedText: string;
   error: string | null;
-  loadModel: (modelPath: string, backend?: BackendType, supportedBackends?: BackendType[], isVision?: boolean, maxContextLength?: number) => Promise<InitializeResult>;
+  loadModel: (modelPath: string, backend?: BackendType, supportedBackends?: BackendType[], isVision?: boolean, maxContextLength?: number, isAudio?: boolean) => Promise<InitializeResult>;
   generate: (prompt: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithVision: (prompt: string, imagePath: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithAudio: (prompt: string, audioPath: string, onToken?: (token: string) => void) => Promise<string>;
@@ -51,11 +51,12 @@ export const useLLM = (): UseLLMReturn => {
       backend: BackendType = 'AUTO',
       supportedBackends: BackendType[] = ['CPU', 'GPU'],
       isVision: boolean = false,
-      maxContextLength: number = 4096
+      maxContextLength: number = 4096,
+      isAudio: boolean = false
     ): Promise<InitializeResult> => {
       setError(null);
       try {
-        const result = await LLMService.initialize(modelPath, backend, supportedBackends, isVision, maxContextLength);
+        const result = await LLMService.initialize(modelPath, backend, supportedBackends, isVision, maxContextLength, isAudio);
         setIsLoaded(result.success);
         setActiveBackend(result.actualBackend);
         return result;
@@ -105,14 +106,14 @@ export const useLLM = (): UseLLMReturn => {
               reject(new Error(errorEvent.error));
             }
           );
-        } catch (err: any) {
-          setIsGenerating(false);
-          setError(err?.message || 'Failed to start generation');
-          reject(err);
-        }
+      } catch (err: any) {
+        setIsGenerating(false);
+        setError(err?.message || 'Failed to start generation');
+        reject(err);
+      }
       });
     },
-    []
+    [setIsGenerating]
   );
 
   const generateWithVision = useCallback(
@@ -145,7 +146,7 @@ export const useLLM = (): UseLLMReturn => {
         throw err;
       }
     },
-    []
+    [setIsGenerating]
   );
 
   const generateWithAudio = useCallback(
@@ -178,7 +179,7 @@ export const useLLM = (): UseLLMReturn => {
         throw err;
       }
     },
-    []
+    [setIsGenerating]
   );
 
   const stopGeneration = useCallback(async () => {
@@ -192,14 +193,14 @@ export const useLLM = (): UseLLMReturn => {
       setIsGenerating(false);
     }
     return stopped;
-  }, []);
+  }, [setIsGenerating]);
 
   const unloadModel = useCallback(async () => {
     // Stop any active generation first before unloading
     if (isGenerating) {
       try {
         await LLMService.stopGeneration();
-      } catch (_) {
+      } catch {
         // Ignore — we're unloading anyway
       }
       if (cleanupRef.current) {
@@ -217,7 +218,7 @@ export const useLLM = (): UseLLMReturn => {
       setStreamedText('');
     }
     return success;
-  }, [isGenerating]);
+  }, [isGenerating, setIsGenerating]);
 
   return {
     isLoaded,

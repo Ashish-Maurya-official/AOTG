@@ -1197,7 +1197,8 @@ const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         preferredBackend,
                         model.supportedBackends,
                         model.supportsVision,
-                        model.maxContextLength
+                        model.maxContextLength,
+                        model.supportsAudio
                     );
                     dispatch(
                         setLoadedModel({

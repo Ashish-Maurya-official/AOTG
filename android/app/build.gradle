@@ -110,7 +110,10 @@ android {
     // limit with deeply nested codegen paths (e.g. react-native-gesture-handler).
     externalNativeBuild {
         cmake {
-            buildStagingDirectory = file("C:/tmp/aotg-cxx")
+            path file("src/main/jni/CMakeLists.txt")
+            buildStagingDirectory = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("windows")
+                ? file("C:/tmp/aotg-cxx")
+                : file(".cxx")
         }
     }
 }
@@ -125,6 +128,8 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.17.0")
+    implementation("com.google.oboe:oboe:1.10.0")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")

@@ -20,6 +20,7 @@ class MainApplication : Application(), ReactApplication {
           // Packages that cannot be autolinked yet can be added manually here, for example:
           // add(MyReactNativePackage())
           add(LLMPackage())
+          add(com.ashish.technologies.aotg.turbo_modules.liveaudio.LiveAudioPackage())
           add(AccessibilityPackage())
           add(DocumentProcessorPackage())
           add(MemoryPackage())

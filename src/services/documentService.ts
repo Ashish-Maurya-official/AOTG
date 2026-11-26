@@ -1,4 +1,4 @@
-import { NativeEventEmitter } from 'react-native';
+import { NativeEventEmitter, Platform } from 'react-native';
 import NativeDocumentProcessor, { DocumentResult } from '../native/turbo_modules/DocumentProcessor/NativeDocumentProcessor';
 import { getRelevantChunks, DocumentChunk } from '../utils/BM25';
 
@@ -13,7 +13,17 @@ export interface ProcessOptions {
 }
 
 class DocumentServiceImpl {
-  private eventEmitter = new NativeEventEmitter(NativeDocumentProcessor as any);
+  private eventEmitter: NativeEventEmitter | null = null;
+
+  constructor() {
+    if (Platform.OS === 'android') {
+      try {
+        this.eventEmitter = new NativeEventEmitter(NativeDocumentProcessor as any);
+      } catch (err) {
+        console.warn('[DocumentService] Could not initialize NativeEventEmitter:', err);
+      }
+    }
+  }
 
   /**
    * Process a document natively (extract text, OCR, parse OOXML).
@@ -39,6 +49,9 @@ class DocumentServiceImpl {
    * Listen to progress events.
    */
   public onProgress(callback: (event: DocumentProgressEvent | any) => void): () => void {
+    if (!this.eventEmitter) {
+      return () => {};
+    }
     const sub = this.eventEmitter.addListener('onDocumentProgress', callback);
     return () => sub.remove();
   }

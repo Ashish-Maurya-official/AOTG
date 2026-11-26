@@ -7,6 +7,7 @@ import android.util.Log
 import com.ashish.technologies.aotg.NativeAccessibilitySpec
 import com.ashish.technologies.aotg.services.AOTGAccessibilityService
 import com.ashish.technologies.aotg.services.AgentForegroundService
+import com.ashish.technologies.aotg.turbo_modules.liveaudio.LiveAudioModule
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -269,6 +270,13 @@ class AccessibilityModule(
      */
     override fun startAgentService(promise: Promise) {
         try {
+            if (LiveAudioModule.isLiveSessionRunning) {
+                promise.reject(
+                    "ERR_LIVE_TALK_ACTIVE",
+                    "Cannot start Automation Agent while Live Voice Talk is active."
+                )
+                return
+            }
             AgentForegroundService.start(reactContext)
             promise.resolve(true)
         } catch (e: Exception) {

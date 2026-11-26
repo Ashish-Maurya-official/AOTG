@@ -14,8 +14,12 @@ import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ThinkingConfig
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -59,19 +63,59 @@ class LLMModule(
         const val EVENT_ON_DOWNLOAD_COMPLETE = "onDownloadComplete"
         const val EVENT_ON_DOWNLOAD_ERROR = "onDownloadError"
         const val EVENT_ON_DOWNLOAD_CANCELLED = "onDownloadCancelled"
+
+        @Volatile
+        internal var activeInstance: LLMModule? = null
+            private set
     }
 
+    internal data class LiveTurnMessage(
+        val role: String,
+        val text: String
+    )
+
+    internal interface LiveGenerationListener {
+        fun onChunk(chunk: String)
+        fun onComplete(fullText: String)
+        fun onError(message: String)
+        fun onCancelled(partialText: String)
+    }
+
+    internal data class LivePrepareResult(
+        val ready: Boolean,
+        val hasAudioBackend: Boolean,
+        val backend: String,
+        val maxTokens: Int
+    )
+
+    private data class LiveConversationSpec(
+        val systemInstruction: String?,
+        val initialMessages: List<LiveTurnMessage>,
+        val disableThinking: Boolean
+    )
+
     private val executor: ExecutorService = Executors.newCachedThreadPool()
+    private val actorExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "AOTG-EngineActor").apply { isDaemon = true }
+    }
+    private val actorDispatcher: CoroutineDispatcher = actorExecutor.asCoroutineDispatcher()
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    init {
+        activeInstance = this
+    }
 
     /**
      * One in-flight generation. Each run owns its own stop flag + buffer so a
      * stopped run that is still winding down natively can never leak tokens
      * into the next run.
      */
-    private class GenerationSession {
+    private class GenerationSession(
+        val isLiveTurn: Boolean = false
+    ) {
         val stop = AtomicBoolean(false)
+        val pendingStart = AtomicBoolean(true)
         val text = StringBuilder()
         var job: Job? = null
     }
@@ -82,9 +126,11 @@ class LLMModule(
     @Volatile private var engine: Engine? = null
     @Volatile private var conversation: Conversation? = null
 
-    /** Serializes every engine lifecycle operation (load / unload / delete / reset). */
+    /** Serializes every engine & conversation lifecycle operation via the Engine Actor. */
     private val lifecycleMutex = Mutex()
     private val isInitializing = AtomicBoolean(false)
+    @Volatile private var conversationNeedsReset: Boolean = false
+    @Volatile private var activeLiveConversationSpec: LiveConversationSpec? = null
 
     // Active Downloads tracker: modelId -> cancellation flag
     private val activeDownloads = ConcurrentHashMap<String, AtomicBoolean>()
@@ -92,39 +138,168 @@ class LLMModule(
     @Volatile private var isLoaded: Boolean = false
     @Volatile private var currentModelPath: String? = null
     private var currentBackend: String = "AUTO"
+    private var currentBackendChain: List<String> = listOf("GPU", "CPU")
     @Volatile private var activeBackend: String = "CPU"
     @Volatile private var activeMaxTokens: Int = MAX_NUM_TOKENS
+    @Volatile private var activeIsVision: Boolean = false
+    @Volatile private var activeIsAudio: Boolean = false
+    @Volatile private var requestedIsVision: Boolean = false
+    @Volatile private var requestedIsAudio: Boolean = false
+    @Volatile private var audioFallbackExhausted: Boolean = false
     private var listenerCount = 0
 
-    /** True while a generation job is alive (including the wind-down after a stop). */
-    private fun isGenerationActive(): Boolean = currentSession?.job?.isActive == true
+    /** True while a generation job is alive or scheduled (including post-stop wind-down). */
+    private fun isGenerationActive(): Boolean {
+        val s = currentSession ?: return false
+        return s.pendingStart.get() || s.job?.isActive == true
+    }
 
     /** True while a generation is running and has NOT been asked to stop. */
     private fun isGenerationBusy(): Boolean {
         val s = currentSession ?: return false
-        return s.job?.isActive == true && !s.stop.get()
+        return (s.pendingStart.get() || s.job?.isActive == true) && !s.stop.get()
+    }
+
+    private fun cancelProcessSafely(conv: Conversation?) {
+        if (conv == null) return
+        try {
+            if (conv.isAlive) conv.cancelProcess()
+        } catch (t: Throwable) {
+            Log.w(TAG, "cancelProcess failed: ${t.message}")
+        }
+    }
+
+    private fun createConfiguredConversation(
+        eng: Engine,
+        spec: LiveConversationSpec?
+    ): Conversation {
+        if (spec == null) {
+            return eng.createConversation()
+        }
+        val extraSystem = spec.initialMessages
+            .filter { it.role.equals("system", ignoreCase = true) }
+            .mapNotNull { it.text.trim().takeIf { s -> s.isNotEmpty() } }
+        val combinedSystem = listOfNotNull(
+            spec.systemInstruction?.trim()?.takeIf { it.isNotEmpty() },
+            *extraSystem.toTypedArray()
+        ).joinToString("\n\n").trim()
+        val sysContents = combinedSystem
+            .takeIf { it.isNotEmpty() }
+            ?.let { Contents.of(Content.Text(it)) }
+        val seedMessages = spec.initialMessages.mapNotNull { turn ->
+            val cleanText = turn.text.trim()
+            if (cleanText.isEmpty()) return@mapNotNull null
+            when (turn.role.lowercase()) {
+                "assistant", "model" -> Message.model(cleanText)
+                "system" -> null
+                else -> Message.user(cleanText)
+            }
+        }
+        val sampler = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7)
+        val primaryConfig = ConversationConfig(
+            systemInstruction = sysContents,
+            initialMessages = seedMessages,
+            samplerConfig = sampler,
+            thinkingConfig = if (spec.disableThinking) {
+                ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+            } else {
+                null
+            }
+        )
+        return try {
+            eng.createConversation(primaryConfig)
+        } catch (t: Throwable) {
+            if (spec.disableThinking) {
+                Log.w(TAG, "createConversation with ThinkingConfig failed, retrying without: ${t.message}")
+                eng.createConversation(
+                    ConversationConfig(
+                        systemInstruction = sysContents,
+                        initialMessages = seedMessages,
+                        samplerConfig = sampler
+                    )
+                )
+            } else {
+                throw t
+            }
+        }
     }
 
     /**
-     * Ask the native runtime to stop decoding and wait until the generation job
-     * has fully finished. Only after this returns is it safe to close the
-     * conversation/engine (closing mid-inference is a native SIGSEGV).
+     * Strictly awaits any running/stopped generation job's completion (`job.join()`)
+     * before closing and recreating the [Conversation] at most ONCE. Must be
+     * called with [lifecycleMutex] held on the Engine Actor.
+     */
+    private suspend fun awaitSessionAndRecreateLocked(
+        targetSession: GenerationSession?,
+        overrideSpec: LiveConversationSpec? = null,
+        clearSpecToDefault: Boolean = false,
+        resetIfCancelled: Boolean = true
+    ): Boolean {
+        var finished = true
+        val job = targetSession?.job
+        if (targetSession != null && job != null && job.isActive) {
+            targetSession.stop.set(true)
+            conversationNeedsReset = true
+            finished = false
+            for (attempt in 1..2) {
+                cancelProcessSafely(conversation)
+                if (withTimeoutOrNull(STOP_TIMEOUT_MS / 2) { job.join() } != null) {
+                    finished = true
+                    break
+                }
+            }
+            if (!finished) {
+                Log.w(TAG, "Generation did not stop within ${STOP_TIMEOUT_MS}ms — force-cancelling job")
+                job.cancel()
+                withTimeoutOrNull(1000L) { job.join() }
+            }
+        } else if (targetSession?.stop?.get() == true) {
+            conversationNeedsReset = true
+        }
+
+        if (clearSpecToDefault) {
+            activeLiveConversationSpec = null
+        }
+
+        val eng = engine
+        val shouldRecreate =
+            eng != null &&
+                eng.isInitialized() &&
+                isLoaded &&
+                ((resetIfCancelled && conversationNeedsReset) || overrideSpec != null || clearSpecToDefault)
+
+        if (shouldRecreate && eng != null) {
+            val specToApply = if (clearSpecToDefault) null else (overrideSpec ?: activeLiveConversationSpec)
+            closeConversationSafely()
+            conversation = createConfiguredConversation(eng, specToApply)
+            if (overrideSpec != null) {
+                activeLiveConversationSpec = overrideSpec
+            }
+            conversationNeedsReset = false
+        }
+
+        if (targetSession != null && currentSession === targetSession && targetSession.job?.isActive != true) {
+            currentSession = null
+        }
+        return finished
+    }
+
+    /**
+     * Backwards-compatible wrapper used during unload and invalidation.
      */
     private suspend fun stopGenerationAndAwait(timeoutMs: Long = STOP_TIMEOUT_MS): Boolean {
         val session = currentSession ?: return true
         val job = session.job
-        if (job == null || !job.isActive) return true
+        if (job == null || !job.isActive) {
+            currentSession = null
+            return true
+        }
 
         session.stop.set(true)
+        conversationNeedsReset = true
         var finished = false
-        // Two attempts: the first cancelProcess() can land before the native
-        // session has started prefill (tiny window) and be missed.
         for (attempt in 1..2) {
-            try {
-                conversation?.let { if (it.isAlive) it.cancelProcess() }
-            } catch (t: Throwable) {
-                Log.w(TAG, "cancelProcess failed (attempt $attempt): ${t.message}")
-            }
+            cancelProcessSafely(conversation)
             finished = withTimeoutOrNull(timeoutMs / 2) { job.join() } != null
             if (finished) break
         }
@@ -133,6 +308,7 @@ class LLMModule(
             job.cancel()
             withTimeoutOrNull(1000L) { job.join() }
         }
+        currentSession = null
         return finished
     }
 
@@ -170,40 +346,33 @@ class LLMModule(
         currentModelPath = null
         activeBackend = "CPU"
         activeMaxTokens = MAX_NUM_TOKENS
+        activeIsVision = false
+        activeIsAudio = false
+        audioFallbackExhausted = false
+        conversationNeedsReset = false
+        activeLiveConversationSpec = null
         currentSession = null
         val after = Debug.getNativeHeapAllocatedSize()
         Log.i(TAG, "Engine released. Native heap: ${before / 1048576} MB -> ${after / 1048576} MB")
     }
 
-    /**
-     * Recreates the conversation on the live engine without acquiring the
-     * lifecycle mutex. Safe to call from the generation coroutine (which is not
-     * inside the mutex) after a cancelProcess() left the conversation in a
-     * broken state.
-     *
-     * If the engine is gone (raced with an unload), this is a no-op.
-     */
-    private fun resetConversationInternal() {
-        val eng = engine
-        if (eng == null || !eng.isInitialized() || !isLoaded) return
-        try {
-            closeConversationSafely()
-            conversation = eng.createConversation()
-            Log.d(TAG, "Conversation reset after cancelled generation")
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to reset conversation after cancel: ${t.message}")
-        }
-    }
-
     /** Called by React Native when the module/bridge is torn down (e.g. dev reload). */
     override fun invalidate() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         try {
-            runBlocking { withTimeoutOrNull(4000L) { stopGenerationAndAwait(3000L) } }
-            releaseEngineResources()
+            runBlocking(actorDispatcher) {
+                withTimeoutOrNull(4000L) {
+                    stopGenerationAndAwait(3000L)
+                }
+                releaseEngineResources()
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "invalidate cleanup failed: ${t.message}")
         }
         coroutineScope.cancel()
+        actorExecutor.shutdownNow()
         executor.shutdownNow()
         super.invalidate()
     }
@@ -555,13 +724,117 @@ class LLMModule(
      * load request while one is in flight is rejected with ERR_BUSY instead of
      * racing the native runtime.
      */
-    override fun initialize(modelPath: String, backend: String, isVision: Boolean, maxContextLength: Double, promise: Promise) {
+    private data class EngineInitOutcome(
+        val engine: Engine,
+        val backend: String,
+        val isVision: Boolean,
+        val isAudio: Boolean
+    )
+
+    private fun tryInitEnginePass(
+        file: File,
+        backendChain: List<String>,
+        useVision: Boolean,
+        useAudio: Boolean,
+        effectiveMaxTokens: Int,
+        cacheDirPath: String
+    ): Pair<EngineInitOutcome?, Throwable?> {
+        var lastError: Throwable? = null
+        for (targetBackend in backendChain) {
+            var eng: Engine? = null
+            try {
+                Log.d(TAG, "Attempting LiteRT-LM init (backend=$targetBackend, vision=$useVision, audio=$useAudio, cacheDir=$cacheDirPath)...")
+                val config = EngineConfig(
+                    modelPath = file.absolutePath,
+                    backend = createBackend(targetBackend),
+                    visionBackend = if (useVision) createBackend(targetBackend) else null,
+                    audioBackend = if (useAudio) Backend.CPU() else null,
+                    maxNumTokens = effectiveMaxTokens,
+                    maxNumImages = if (useVision) 1 else null,
+                    cacheDir = cacheDirPath
+                )
+                eng = Engine(config)
+                eng.initialize()
+                Log.i(TAG, "Initialized LiteRT-LM on $targetBackend (vision=$useVision, audio=$useAudio)")
+                return Pair(EngineInitOutcome(eng, targetBackend, useVision, useAudio), null)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Backend $targetBackend (vision=$useVision, audio=$useAudio) failed: ${t.message}", t)
+                lastError = t
+                closeEngineSafely(eng)
+            }
+        }
+        return Pair(null, lastError)
+    }
+
+    private fun initializeEngineWithFallbacksLocked(
+        file: File,
+        backendChain: List<String>,
+        wantVision: Boolean,
+        wantAudio: Boolean,
+        effectiveMaxTokens: Int,
+        convSpec: LiveConversationSpec?
+    ): EngineInitOutcome {
+        val cacheDirPath = reactContext.cacheDir.absolutePath
+        var fellBackWithoutAudio = false
+        var (outcome, lastError) = tryInitEnginePass(
+            file, backendChain, wantVision, wantAudio, effectiveMaxTokens, cacheDirPath
+        )
+
+        if (outcome == null && wantAudio) {
+            Log.w(TAG, "Initialization failed with audioBackend=CPU. Retrying with audioBackend=null...")
+            fellBackWithoutAudio = true
+            val retry = tryInitEnginePass(file, backendChain, wantVision, false, effectiveMaxTokens, cacheDirPath)
+            outcome = retry.first
+            if (retry.second != null) lastError = retry.second
+        }
+
+        if (outcome == null && wantVision) {
+            Log.w(TAG, "Initialization failed with visionBackend enabled. Retrying in text-only mode...")
+            val retry = tryInitEnginePass(file, backendChain, false, false, effectiveMaxTokens, cacheDirPath)
+            outcome = retry.first
+            if (retry.second != null) lastError = retry.second
+        }
+
+        if (outcome == null) {
+            val errorDetail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "Unknown error"
+            throw Exception("Failed to initialize on backends (${backendChain.joinToString(", ")}): $errorDetail")
+        }
+
+        val conv = try {
+            createConfiguredConversation(outcome.engine, convSpec)
+        } catch (t: Throwable) {
+            closeEngineSafely(outcome.engine)
+            throw Exception("Engine loaded on ${outcome.backend} but conversation could not be created: ${t.message}", t)
+        }
+
+        engine = outcome.engine
+        conversation = conv
+        currentModelPath = file.absolutePath
+        activeBackend = outcome.backend
+        activeMaxTokens = effectiveMaxTokens
+        activeIsVision = outcome.isVision
+        activeIsAudio = outcome.isAudio
+        audioFallbackExhausted = fellBackWithoutAudio && !outcome.isAudio
+        activeLiveConversationSpec = convSpec
+        conversationNeedsReset = false
+        isLoaded = true
+        return outcome
+    }
+
+    override fun initialize(
+        modelPath: String,
+        backend: String,
+        isVision: Boolean,
+        isAudio: Boolean,
+        maxContextLength: Double,
+        promise: Promise
+    ) {
         if (!isInitializing.compareAndSet(false, true)) {
             promise.reject("ERR_BUSY", "A model is already being loaded. Please wait for it to finish.")
             return
         }
 
-        coroutineScope.launch {
+        coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
                     val file = if (modelPath.startsWith("/") || modelPath.startsWith("file:")) {
@@ -570,7 +843,7 @@ class LLMModule(
                         File(getModelsDir(), modelPath)
                     }
 
-                    Log.d(TAG, "Requesting initialization for: ${file.absolutePath} with requested backend: $backend, isVision: $isVision")
+                    Log.d(TAG, "Requesting initialization for: ${file.absolutePath} (backend=$backend, isVision=$isVision, isAudio=$isAudio)")
 
                     if (!file.exists() || file.length() == 0L) {
                         throw Exception("Model file does not exist at ${file.absolutePath}. Please download the model first.")
@@ -578,11 +851,13 @@ class LLMModule(
 
                     // Make sure nothing is decoding, then free the previous engine
                     // completely BEFORE allocating the new one (models are 2–4 GB).
-                    stopGenerationAndAwait()
+                    awaitSessionAndRecreateLocked(
+                        targetSession = currentSession,
+                        clearSpecToDefault = true,
+                        resetIfCancelled = false
+                    )
                     releaseEngineResources()
 
-                    // Enforce a strict mobile limit on maxNumTokens (min(requestedContext, 4096)).
-                    // Mobile hardware cannot support 32K–256K KV-caches without instant OOM crashes.
                     val effectiveMaxTokens = if (maxContextLength > 0) {
                         minOf(maxContextLength.toInt(), MAX_NUM_TOKENS)
                     } else {
@@ -601,92 +876,27 @@ class LLMModule(
                         }
                     }
 
-                    var initializedEngine: Engine? = null
-                    var successfulBackend: String? = null
-                    var lastInitError: Throwable? = null
-
-                    for (targetBackend in backendChain) {
-                        var eng: Engine? = null
-                        try {
-                            Log.d(TAG, "Attempting LiteRT-LM initialization on backend: $targetBackend...")
-                            val config = EngineConfig(
-                                modelPath = file.absolutePath,
-                                backend = createBackend(targetBackend),
-                                visionBackend = if (isVision) createBackend(targetBackend) else null,
-                                maxNumTokens = effectiveMaxTokens,
-                                maxNumImages = if (isVision) 1 else null
-                            )
-                            eng = Engine(config)
-                            eng.initialize()
-
-                            initializedEngine = eng
-                            successfulBackend = targetBackend
-                            Log.i(TAG, "Successfully initialized LiteRT-LM on $targetBackend!")
-                            break
-                        } catch (t: Throwable) {
-                            Log.e(TAG, "Backend $targetBackend failed: ${t.message}", t)
-                            lastInitError = t
-                            // Never leak a partially-initialized engine into the next attempt.
-                            closeEngineSafely(eng)
-                        }
-                    }
-
-                    if (initializedEngine == null || successfulBackend == null) {
-                        // If vision backend was requested, the failure may be because this unknown model
-                        // lacks vision encoder weights. Safely attempt fallback in text-only mode.
-                        if (isVision) {
-                            Log.w(TAG, "Initialization failed with isVision=true. Retrying in text-only mode...")
-                            for (targetBackend in backendChain) {
-                                var eng: Engine? = null
-                                try {
-                                    val config = EngineConfig(
-                                        modelPath = file.absolutePath,
-                                        backend = createBackend(targetBackend),
-                                        visionBackend = null,
-                                        maxNumTokens = effectiveMaxTokens,
-                                        maxNumImages = null
-                                    )
-                                    eng = Engine(config)
-                                    eng.initialize()
-                                    initializedEngine = eng
-                                    successfulBackend = targetBackend
-                                    Log.i(TAG, "Successfully initialized LiteRT-LM in text-only fallback on $targetBackend!")
-                                    break
-                                } catch (t: Throwable) {
-                                    lastInitError = t
-                                    closeEngineSafely(eng)
-                                }
-                            }
-                        }
-                    }
-
-                    if (initializedEngine == null || successfulBackend == null) {
-                        val errorDetail = lastInitError?.message ?: lastInitError?.javaClass?.simpleName ?: "Unknown error"
-                        throw Exception("Failed to initialize on backends (${backendChain.joinToString(", ")}): $errorDetail")
-                    }
-
-                    val conv = try {
-                        initializedEngine.createConversation()
-                    } catch (t: Throwable) {
-                        closeEngineSafely(initializedEngine)
-                        throw Exception("Engine loaded on $successfulBackend but conversation could not be created: ${t.message}", t)
-                    }
-
-                    engine = initializedEngine
-                    conversation = conv
-                    currentModelPath = file.absolutePath
                     currentBackend = backend
-                    activeBackend = successfulBackend
-                    activeMaxTokens = effectiveMaxTokens
-                    isLoaded = true
+                    currentBackendChain = backendChain
+                    requestedIsVision = isVision
+                    requestedIsAudio = isAudio
 
-                    val wasFallback = !successfulBackend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
+                    val outcome = initializeEngineWithFallbacksLocked(
+                        file = file,
+                        backendChain = backendChain,
+                        wantVision = isVision,
+                        wantAudio = isAudio,
+                        effectiveMaxTokens = effectiveMaxTokens,
+                        convSpec = null
+                    )
+
+                    val wasFallback = !outcome.backend.equals(backend, ignoreCase = true) && !backend.equals("AUTO", ignoreCase = true)
 
                     val eventParams = Arguments.createMap().apply {
                         putBoolean("success", true)
                         putString("modelPath", file.absolutePath)
                         putString("requestedBackend", backend)
-                        putString("actualBackend", successfulBackend)
+                        putString("actualBackend", outcome.backend)
                         putBoolean("wasFallback", wasFallback)
                     }
 
@@ -694,7 +904,7 @@ class LLMModule(
                         putBoolean("success", true)
                         putString("modelPath", file.absolutePath)
                         putString("requestedBackend", backend)
-                        putString("actualBackend", successfulBackend)
+                        putString("actualBackend", outcome.backend)
                         putBoolean("wasFallback", wasFallback)
                     }
 
@@ -716,13 +926,15 @@ class LLMModule(
     /**
      * Shared generation runner for text and multimodal prompts.
      *
-     * - Rejects if a generation is actively running (not yet asked to stop).
-     * - If the previous run was stopped but is still winding down natively, the
-     *   new run waits for it to finish first instead of overlapping two decodes.
-     * - Each run owns its own [GenerationSession] so late tokens from a stopped
-     *   run can never leak into this one.
+     * Serializes setup/reset against the Engine Actor ([lifecycleMutex] + [actorDispatcher])
+     * so a previous cancelled run's `job.join()` always finishes before recreating
+     * [Conversation] once.
      */
-    private fun startGenerationInternal(buildContents: () -> Contents, promise: Promise) {
+    private fun startGenerationInternal(
+        needsVisionRestore: Boolean = false,
+        buildContents: () -> Contents,
+        promise: Promise
+    ) {
         if (conversation == null || engine == null || !isLoaded) {
             promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model is currently loaded in memory. Please download and load a model first.")
             return
@@ -739,38 +951,56 @@ class LLMModule(
         }
 
         val previous = currentSession
-        val session = GenerationSession()
+        val session = GenerationSession(isLiveTurn = false)
         currentSession = session
         promise.resolve(true)
 
-        session.job = coroutineScope.launch {
+        val job = coroutineScope.launch(actorDispatcher, start = CoroutineStart.LAZY) {
             try {
-                // Let a stopped-but-still-decoding previous run finish natively.
-                val prevJob = previous?.job
-                if (prevJob != null && prevJob.isActive) {
-                    val done = withTimeoutOrNull(STOP_TIMEOUT_MS) { prevJob.join() } != null
-                    if (!done) {
-                        throw IllegalStateException("Previous generation did not stop in time. Please try again.")
+                var conv: Conversation? = null
+                lifecycleMutex.withLock {
+                    if (session.stop.get()) {
+                        session.pendingStart.set(false)
+                        return@withLock
                     }
-                }
 
-                // After cancelProcess(), the LiteRT-LM conversation can get
-                // stuck — sendMessageAsync() hangs silently. Recreate the
-                // conversation so the next generation starts clean.
-                if (previous?.stop?.get() == true) {
-                    resetConversationInternal()
+                    awaitSessionAndRecreateLocked(
+                        targetSession = if (previous !== session) previous else null,
+                        clearSpecToDefault = activeLiveConversationSpec != null
+                    )
+
+                    if (needsVisionRestore && requestedIsVision && !activeIsVision && currentModelPath != null) {
+                        val file = File(currentModelPath!!)
+                        if (file.exists() && file.length() > 0L) {
+                            releaseEngineResources()
+                            initializeEngineWithFallbacksLocked(
+                                file = file,
+                                backendChain = currentBackendChain,
+                                wantVision = true,
+                                wantAudio = requestedIsAudio,
+                                effectiveMaxTokens = activeMaxTokens,
+                                convSpec = null
+                            )
+                        }
+                    }
+
+                    session.pendingStart.set(false)
+                    if (session.stop.get()) {
+                        return@withLock
+                    }
+                    conv = conversation
                 }
 
                 if (session.stop.get()) return@launch
 
-                val conv = conversation
-                if (conv == null || !conv.isAlive || !isLoaded) {
+                val activeConv = conv
+                if (activeConv == null || !activeConv.isAlive || !isLoaded) {
                     throw IllegalStateException("Model was unloaded before generation could start.")
                 }
 
                 Log.d(TAG, "Executing LiteRT-LM inference on backend: $activeBackend")
 
-                conv.sendMessageAsync(buildContents()).collect { message ->
+                activeConv.sendMessageAsync(buildContents()).collect { message ->
                     val chunkText = message.toString()
                     if (session.stop.get() || chunkText.isEmpty()) {
                         return@collect
@@ -786,8 +1016,6 @@ class LLMModule(
                     sendEvent(EVENT_ON_TOKEN, tokenMap)
                 }
 
-                // Natural completion. (After a stop, stopGeneration() already
-                // emitted the terminal events with the partial text.)
                 if (!session.stop.get()) {
                     sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
                         putString("fullText", session.text.toString())
@@ -798,7 +1026,6 @@ class LLMModule(
                 Log.d(TAG, "Generation coroutine cancelled")
             } catch (t: Throwable) {
                 if (session.stop.get()) {
-                    // Errors surfacing while winding down after cancelProcess() are expected.
                     Log.d(TAG, "Ignoring post-stop generation error: ${t.message}")
                 } else {
                     Log.e(TAG, "Generation failed: ${t.message}", t)
@@ -807,21 +1034,18 @@ class LLMModule(
                     })
                 }
             } finally {
-                // If this generation was cancelled, proactively reset the
-                // conversation so it is in a clean state for the next run
-                // (whether or not a new run is already waiting).
-                if (session.stop.get()) {
-                    resetConversationInternal()
-                }
+                session.pendingStart.set(false)
             }
         }
+        session.job = job
+        job.start()
     }
 
     /**
      * Real LiteRT-LM Output Generation using streaming conversation
      */
     override fun startGeneration(prompt: String, promise: Promise) {
-        startGenerationInternal({ Contents.of(Content.Text(prompt)) }, promise)
+        startGenerationInternal(buildContents = { Contents.of(Content.Text(prompt)) }, promise = promise)
     }
 
     /**
@@ -832,7 +1056,7 @@ class LLMModule(
      * Falls back to text-only generation if the image file is missing.
      */
     override fun startGenerationWithImage(prompt: String, imagePath: String, promise: Promise) {
-        startGenerationInternal({
+        startGenerationInternal(needsVisionRestore = true, buildContents = {
             val imageFile = File(imagePath)
             if (imageFile.exists() && imageFile.length() > 0) {
                 Log.d(TAG, "Vision inference: using image ${imageFile.absolutePath} (${imageFile.length()} bytes)")
@@ -844,7 +1068,7 @@ class LLMModule(
                 Log.w(TAG, "Vision fallback: image not found at $imagePath — using text only")
                 Contents.of(Content.Text(prompt))
             }
-        }, promise)
+        }, promise = promise)
     }
 
     /**
@@ -855,7 +1079,7 @@ class LLMModule(
      * Falls back to text-only generation if the audio file is missing.
      */
     override fun startGenerationWithAudio(prompt: String, audioPath: String, promise: Promise) {
-        startGenerationInternal({
+        startGenerationInternal(buildContents = {
             val audioFile = File(audioPath)
             if (audioFile.exists() && audioFile.length() > 0) {
                 Log.d(TAG, "Audio inference: using audio ${audioFile.absolutePath} (${audioFile.length()} bytes)")
@@ -867,28 +1091,24 @@ class LLMModule(
                 Log.w(TAG, "Audio fallback: audio not found at $audioPath — using text only")
                 Contents.of(Content.Text(prompt))
             }
-        }, promise)
+        }, promise = promise)
     }
 
     /**
-     * Stops the active generation. Signals the native runtime via cancelProcess()
-     * (so it really stops decoding, instead of only cancelling the Kotlin flow)
-     * and immediately emits the terminal events with the partial text so any JS
-     * caller awaiting generate() resolves.
+     * Stops the active generation. Signals native cancelProcess() immediately
+     * and dispatches `job.join()` + single Conversation recreation on the serialized
+     * Engine Actor (eliminating any dual-reset race).
      */
     override fun stopGeneration(promise: Promise) {
         val session = currentSession
-        if (session == null || session.job?.isActive != true || session.stop.get()) {
+        if (session == null || (!session.pendingStart.get() && session.job?.isActive != true) || session.stop.get()) {
             promise.resolve(false)
             return
         }
 
         session.stop.set(true)
-        try {
-            conversation?.let { if (it.isAlive) it.cancelProcess() }
-        } catch (t: Throwable) {
-            Log.w(TAG, "cancelProcess failed: ${t.message}")
-        }
+        conversationNeedsReset = true
+        cancelProcessSafely(conversation)
 
         val partial = session.text.toString()
         sendEvent(EVENT_ON_GENERATION_STOPPED, Arguments.createMap().apply {
@@ -899,6 +1119,17 @@ class LLMModule(
             putBoolean("isFinished", true)
         })
         promise.resolve(true)
+
+        coroutineScope.launch(actorDispatcher) {
+            lifecycleMutex.withLock {
+                if (currentSession === session || conversationNeedsReset) {
+                    awaitSessionAndRecreateLocked(if (currentSession === session) session else null)
+                    if (currentSession === session) {
+                        currentSession = null
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -941,7 +1172,7 @@ class LLMModule(
      * the same engine. Used when the context window is exhausted.
      */
     override fun resetConversation(promise: Promise) {
-        coroutineScope.launch {
+        coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
                     val eng = engine
@@ -949,9 +1180,11 @@ class LLMModule(
                         promise.reject("ERR_NOT_LOADED", "No model is loaded.")
                         return@withLock
                     }
-                    stopGenerationAndAwait()
-                    closeConversationSafely()
-                    conversation = eng.createConversation()
+                    awaitSessionAndRecreateLocked(
+                        targetSession = currentSession,
+                        clearSpecToDefault = true
+                    )
+                    currentSession = null
                     promise.resolve(true)
                 }
             } catch (e: Exception) {
@@ -965,11 +1198,9 @@ class LLMModule(
      * Unload model from memory. Idempotent — resolves true if nothing is loaded.
      */
     override fun unloadModel(promise: Promise) {
-        coroutineScope.launch {
+        coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
-                    // Stop decoding first and wait for the native runtime to
-                    // actually finish — closing mid-inference is a native crash.
                     val stopped = stopGenerationAndAwait()
                     if (!stopped) {
                         Log.w(TAG, "Proceeding with unload after generation stop timeout")
@@ -981,6 +1212,272 @@ class LLMModule(
                 promise.reject("ERR_UNLOAD", e.message, e)
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Live Audio Talk Engine Actor Entry Points (In-Process JNI -> Kotlin)
+    // -------------------------------------------------------------------------
+
+    internal fun isModelLoadedSync(): Boolean =
+        isLoaded && engine?.isInitialized() == true && conversation?.isAlive == true
+
+    internal fun isAudioBackendEnabled(): Boolean = activeIsAudio
+
+    internal fun getActiveMaxTokens(): Int = activeMaxTokens
+
+    internal fun getLiveContextTokenCount(): Int {
+        val conv = conversation
+        if (conv == null || !conv.isAlive || isGenerationActive()) return 0
+        return try {
+            conv.getTokenCount()
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    /**
+     * Prepares the loaded LiteRT-LM engine for Live Talk mode:
+     * - Awaits any active generation cleanly.
+     * - Disables [visionBackend] (`null`) if currently allocated so Vision encoders
+     *   do not exhaust memory alongside Oboe + Silero VAD + TTS, reusing `cacheDir`.
+     * - Ensures [audioBackend] is configured when supported.
+     * - Builds the initial [Conversation] via [ConversationConfig] (system instruction,
+     *   seed history, `ThinkingConfig(false, 0)`).
+     */
+    internal suspend fun prepareForLiveTalk(
+        systemInstruction: String?,
+        seedHistory: List<LiveTurnMessage>,
+        requireAudioIfSupported: Boolean,
+        disableVision: Boolean = true
+    ): LivePrepareResult = withContext(actorDispatcher) {
+        lifecycleMutex.withLock {
+            val eng = engine
+            val modelPath = currentModelPath
+            if (eng == null || !eng.isInitialized() || !isLoaded || modelPath == null) {
+                return@withLock LivePrepareResult(false, false, "", 0)
+            }
+
+            awaitSessionAndRecreateLocked(currentSession)
+            currentSession = null
+
+            val spec = LiveConversationSpec(
+                systemInstruction = systemInstruction,
+                initialMessages = seedHistory,
+                disableThinking = true
+            )
+
+            val needReloadForVision = disableVision && activeIsVision
+            val needReloadForAudio =
+                requireAudioIfSupported && requestedIsAudio && !activeIsAudio && !audioFallbackExhausted
+
+            if (needReloadForVision || needReloadForAudio) {
+                val file = File(modelPath)
+                if (file.exists() && file.length() > 0L) {
+                    val savedBackendChain = currentBackendChain
+                    val savedMaxTokens = activeMaxTokens
+                    val savedReqVision = requestedIsVision
+                    val savedReqAudio = requestedIsAudio || requireAudioIfSupported
+
+                    releaseEngineResources()
+                    requestedIsVision = savedReqVision
+                    requestedIsAudio = savedReqAudio
+
+                    initializeEngineWithFallbacksLocked(
+                        file = file,
+                        backendChain = savedBackendChain,
+                        wantVision = !disableVision && savedReqVision,
+                        wantAudio = savedReqAudio,
+                        effectiveMaxTokens = savedMaxTokens,
+                        convSpec = spec
+                    )
+                    return@withLock LivePrepareResult(
+                        ready = true,
+                        hasAudioBackend = activeIsAudio,
+                        backend = activeBackend,
+                        maxTokens = activeMaxTokens
+                    )
+                }
+            }
+
+            closeConversationSafely()
+            conversation = createConfiguredConversation(eng, spec)
+            activeLiveConversationSpec = spec
+            conversationNeedsReset = false
+            LivePrepareResult(
+                ready = true,
+                hasAudioBackend = activeIsAudio,
+                backend = activeBackend,
+                maxTokens = activeMaxTokens
+            )
+        }
+    }
+
+    /**
+     * Signals native cancellation immediately without killing the Kotlin coroutine
+     * before [stopAndRebuildLiveConversation] awaits `job.join()`.
+     */
+    internal fun cancelLiveGenerationNow() {
+        currentSession?.let { active ->
+            if (active.isLiveTurn) {
+                active.stop.set(true)
+                conversationNeedsReset = true
+                cancelProcessSafely(conversation)
+            }
+        }
+    }
+
+    /**
+     * Immediately cancels any in-flight Live Talk inference (`cancelProcess`),
+     * strictly awaits `job.join()` on the serialized Engine Actor, and rebuilds
+     * [Conversation] once with watermarked shadow history.
+     */
+    internal suspend fun stopAndRebuildLiveConversation(
+        systemInstruction: String?,
+        committedHistory: List<LiveTurnMessage>,
+        disableThinking: Boolean = true
+    ): Boolean {
+        currentSession?.let { active ->
+            active.stop.set(true)
+            conversationNeedsReset = true
+            cancelProcessSafely(conversation)
+        }
+        return withContext(actorDispatcher) {
+            lifecycleMutex.withLock {
+                val eng = engine
+                if (eng == null || !eng.isInitialized() || !isLoaded) {
+                    return@withLock false
+                }
+                val spec = LiveConversationSpec(
+                    systemInstruction = systemInstruction,
+                    initialMessages = committedHistory,
+                    disableThinking = disableThinking
+                )
+                awaitSessionAndRecreateLocked(
+                    targetSession = currentSession,
+                    overrideSpec = spec
+                )
+                currentSession = null
+                true
+            }
+        }
+    }
+
+    internal suspend fun endLiveTalkSession() {
+        currentSession?.let { active ->
+            if (active.isLiveTurn) {
+                active.stop.set(true)
+                conversationNeedsReset = true
+                cancelProcessSafely(conversation)
+            }
+        }
+        withContext(actorDispatcher) {
+            lifecycleMutex.withLock {
+                if (!isLoaded || engine == null) return@withLock
+                awaitSessionAndRecreateLocked(
+                    targetSession = if (currentSession?.isLiveTurn == true) currentSession else null,
+                    clearSpecToDefault = true
+                )
+                if (currentSession?.isLiveTurn == true) {
+                    currentSession = null
+                }
+            }
+        }
+    }
+
+    /**
+     * Dispatches an in-RAM 44-byte WAV ByteArray directly to LiteRT-LM on the
+     * serialized Engine Actor (zero temporary disk file writes).
+     */
+    internal fun sendAudioBytesAsync(
+        wavBytes: ByteArray,
+        prompt: String,
+        listener: LiveGenerationListener
+    ): Job {
+        val contents = if (prompt.isNotBlank()) {
+            Contents.of(Content.AudioBytes(wavBytes), Content.Text(prompt))
+        } else {
+            Contents.of(Content.AudioBytes(wavBytes))
+        }
+        return startLiveTurnInternal(contents, listener)
+    }
+
+    /**
+     * Text-turn Live Talk dispatch (used when device OS-ASR transcribes speech
+     * for text-only `.litertlm` models).
+     */
+    internal fun sendLiveTextAsync(
+        prompt: String,
+        listener: LiveGenerationListener
+    ): Job {
+        return startLiveTurnInternal(Contents.of(Content.Text(prompt)), listener)
+    }
+
+    private fun startLiveTurnInternal(
+        contents: Contents,
+        listener: LiveGenerationListener
+    ): Job {
+        val previous = currentSession
+        val session = GenerationSession(isLiveTurn = true)
+        currentSession = session
+
+        val job = coroutineScope.launch(actorDispatcher, start = CoroutineStart.LAZY) {
+            try {
+                var conv: Conversation? = null
+                lifecycleMutex.withLock {
+                    if (session.stop.get()) {
+                        session.pendingStart.set(false)
+                        return@withLock
+                    }
+                    awaitSessionAndRecreateLocked(
+                        targetSession = if (previous !== session) previous else null
+                    )
+                    session.pendingStart.set(false)
+                    if (session.stop.get()) {
+                        return@withLock
+                    }
+                    conv = conversation
+                }
+
+                if (session.stop.get()) {
+                    listener.onCancelled(session.text.toString())
+                    return@launch
+                }
+
+                val activeConv = conv
+                if (activeConv == null || !activeConv.isAlive || !isLoaded) {
+                    listener.onError("No LiteRT-LM model is currently loaded.")
+                    return@launch
+                }
+
+                activeConv.sendMessageAsync(contents).collect { message ->
+                    if (session.stop.get()) return@collect
+                    val chunkText = message.toString()
+                    if (chunkText.isEmpty()) return@collect
+                    session.text.append(chunkText)
+                    listener.onChunk(chunkText)
+                }
+
+                if (session.stop.get()) {
+                    listener.onCancelled(session.text.toString())
+                } else {
+                    listener.onComplete(session.text.toString())
+                }
+            } catch (e: CancellationException) {
+                listener.onCancelled(session.text.toString())
+            } catch (t: Throwable) {
+                if (session.stop.get()) {
+                    listener.onCancelled(session.text.toString())
+                } else {
+                    Log.e(TAG, "Live generation failed: ${t.message}", t)
+                    listener.onError(t.message ?: "Unknown LiteRT-LM error")
+                }
+            } finally {
+                session.pendingStart.set(false)
+            }
+        }
+        session.job = job
+        job.start()
+        return job
     }
 
     /**

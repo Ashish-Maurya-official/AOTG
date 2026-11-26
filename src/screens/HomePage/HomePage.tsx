@@ -45,7 +45,10 @@ import {
     removeCustomModel,
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
+import LiveTalkModal from '../../components/LiveTalkModal';
+import PermissionModal from '../../components/PermissionModal';
 import useLLM from '../../hooks/useLLM';
+import useLiveAudio from '../../hooks/useLiveAudio';
 import LLMService, { estimateTokens } from '../../services/llmService';
 import documentService from '../../services/documentService';
 import {
@@ -663,42 +666,41 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
         }).start();
     }, [inputHeightAnim]);
 
-    const handleMicPress = useCallback(async () => {
-        if (isGenerating) return;
+    const messagesRef = useRef<ChatMessage[]>(messages);
+    messagesRef.current = messages;
 
-        if (selectedModel?.supportsAudio) {
-            try {
-                const [pickResult] = await pick({
-                    type: [DocumentPickerTypes.audio],
-                    copyTo: 'cachesDirectory',
-                });
-                if (pickResult?.uri) {
-                    const localUri = pickResult.uri.startsWith('file://') ? pickResult.uri : `file://${pickResult.uri}`;
-                    setPendingAttachment({
-                        uri: localUri,
-                        name: pickResult.name || 'Audio Recording',
-                        type: pickResult.type || 'audio/wav',
-                        size: pickResult.size ?? undefined,
-                    });
-                    animateInputHeight(INPUT_HEIGHT_WITH_PREVIEW);
-                }
-            } catch (err: any) {
-                if (!isErrorWithCode(err) || err.code !== errorCodes.OPERATION_CANCELED) {
-                    console.error('[HomePage] Audio pick error:', err);
-                    Alert.alert('Audio Error', 'Failed to select audio file.');
-                }
-            }
-        } else {
-            Alert.alert(
-                'Audio Not Supported',
-                `"${selectedModel.name}" is a text model and does not process direct audio input.\n\nTo use audio input, select an audio-capable model (such as Gemma 4) in the model selector.`,
-                [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Select Model', onPress: openModelSelector },
-                ]
-            );
+    const handleLiveTurnsPersisted = useCallback((sessionId: string, addedMessages: ChatMessage[]) => {
+        if (!activeSessionIdRef.current && sessionId) {
+            activeSessionIdRef.current = sessionId;
+            setActiveSessionId(sessionId);
         }
-    }, [isGenerating, selectedModel, animateInputHeight, openModelSelector]);
+        messagesRef.current = [...messagesRef.current, ...addedMessages];
+        setMessages((prev) => [...prev, ...addedMessages]);
+    }, []);
+
+    const {
+        liveTalk,
+        micLevelSV,
+        speakerLevelSV,
+        openLiveTalk,
+        stopLiveSession,
+        toggleMute,
+        triggerInterrupt,
+        commitManualTurn,
+        cycleOutputRoute,
+        retrySession,
+        micPermissionModal,
+    } = useLiveAudio({
+        activeSessionIdRef,
+        messagesRef,
+        onOpenModelSelector: openModelSelector,
+        onSessionTurnsPersisted: handleLiveTurnsPersisted,
+    });
+
+    const handleMicPress = useCallback(() => {
+        if (isGenerating) return;
+        openLiveTalk();
+    }, [isGenerating, openLiveTalk]);
 
     useEffect(() => {
         Animated.timing(borderRadiusAnim, {
@@ -990,7 +992,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
             dispatch(startLoadingModel(selectedModel.id));
             try {
                 const modelPath = modelStatuses[selectedModel.id]?.localPath || selectedModel.fileName;
-                const result = await loadModel(modelPath, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength);
+                const result = await loadModel(modelPath, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength, selectedModel.supportsAudio);
                 dispatch(
                     setLoadedModel({
                         modelId: selectedModel.id,
@@ -1622,6 +1624,31 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                     onClose={closeModelSelector}
                     selectedModelId={selectedModelId}
                     onSelectModel={handleSelectModel}
+                />
+
+                {/* Live Audio Talk Modal */}
+                <LiveTalkModal
+                    liveTalk={liveTalk}
+                    modelName={selectedModel.name}
+                    micLevelSV={micLevelSV}
+                    speakerLevelSV={speakerLevelSV}
+                    onClose={stopLiveSession}
+                    onToggleMute={toggleMute}
+                    onInterrupt={triggerInterrupt}
+                    onCommitTurn={commitManualTurn}
+                    onCycleRoute={cycleOutputRoute}
+                    onRetry={retrySession}
+                />
+
+                {/* Microphone Permission Prompt */}
+                <PermissionModal
+                    visible={micPermissionModal.visible}
+                    title="Microphone Permission Required"
+                    description="AOTG needs microphone access to run low-latency on-device voice conversations. Audio never leaves your device."
+                    isPermanentlyDenied={micPermissionModal.isPermanentlyDenied}
+                    icon={<MicIcon color={colors.text} size={32} />}
+                    onGrant={micPermissionModal.onGrant}
+                    onCancel={micPermissionModal.onCancel}
                 />
             </KeyboardAvoidingView>
 

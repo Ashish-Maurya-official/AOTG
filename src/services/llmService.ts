@@ -199,15 +199,24 @@ class LLMServiceImpl {
     backend: BackendType = 'AUTO',
     supportedBackends: BackendType[] = ['CPU', 'GPU'],
     isVision: boolean = false,
-    maxContextLength: number = 4096
+    maxContextLength: number = 4096,
+    isAudio: boolean = false
   ): Promise<InitializeResult> {
     try {
       // Determine the fallback chain based on user preference and model capabilities.
       const chainSet = new Set<BackendType>();
+      const lowerPath = modelPath.toLowerCase();
+      const isGpuPackaged =
+        lowerPath.includes('-gpu.') || lowerPath.includes('_gpu.') || lowerPath.endsWith('gpu.litertlm');
+      const isNpuPackaged =
+        !isGpuPackaged && (lowerPath.includes('-npu.') || lowerPath.includes('_npu.'));
 
       if (backend === 'AUTO') {
-        // If AUTO, prefer NPU if supported, else GPU, else CPU
-        if (supportedBackends.includes('NPU')) chainSet.add('NPU');
+        // GPU-packaged .litertlm bundles stall/fail during NPU delegate probing;
+        // prefer NPU on AUTO only for explicitly NPU-packaged or NPU-only models.
+        if (isNpuPackaged || (supportedBackends.length === 1 && supportedBackends.includes('NPU'))) {
+          if (supportedBackends.includes('NPU')) chainSet.add('NPU');
+        }
         if (supportedBackends.includes('GPU')) chainSet.add('GPU');
         if (supportedBackends.includes('CPU')) chainSet.add('CPU');
       } else {
@@ -236,7 +245,7 @@ class LLMServiceImpl {
       
       // Enforce strict mobile limit (never allocate 32K-256K KV-cache on mobile hardware)
       const safeContextLength = Math.min(Math.max(maxContextLength || 4096, 512), 4096);
-      const result = await NativeLLM.initialize(modelPath, backendStr, isVision, safeContextLength);
+      const result = await NativeLLM.initialize(modelPath, backendStr, isVision, isAudio, safeContextLength);
       
       return {
         ...result,
