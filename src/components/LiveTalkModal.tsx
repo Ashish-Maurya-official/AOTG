@@ -1,6 +1,7 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
   Modal,
   Pressable,
@@ -11,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Path } from 'react-native-svg';
 import Reanimated, {
   Easing,
   SharedValue,
@@ -25,6 +27,8 @@ import {
   LiveCaptionTurn,
   LiveOutputRoute,
   LiveTalkSliceState,
+  LiveTtsEnginePref,
+  PhononVoiceOption,
 } from '../store/slices/liveTalkSlice';
 import MicIcon from '../static/images/SVG/MicIcon';
 import LiveIcon from '../static/images/SVG/LiveIcon';
@@ -35,13 +39,93 @@ interface LiveTalkModalProps {
   modelName: string;
   micLevelSV: SharedValue<number>;
   speakerLevelSV: SharedValue<number>;
+  availableRoutes?: string[];
   onClose: () => void;
   onToggleMute: () => void;
   onInterrupt: () => void;
   onCommitTurn: () => void;
   onCycleRoute: () => void;
+  onSelectRoute?: (route: LiveOutputRoute) => void;
   onRetry: () => void;
+  onDownloadPhonon: (variant?: 'q4' | 'fp32') => void;
+  onCancelPhononDownload: () => void;
+  onDeletePhonon: () => void;
+  onSelectTtsEngine: (engine: LiveTtsEnginePref) => void;
+  onSelectVoice: (voiceId: string) => void;
 }
+
+interface RouteOptionSpec {
+  id: LiveOutputRoute;
+  title: string;
+  subtitle: string;
+  aecTag: string;
+}
+
+const ROUTE_OPTIONS: RouteOptionSpec[] = [
+  {
+    id: 'auto',
+    title: 'Auto Smart Route',
+    subtitle: 'Dynamically selects best acoustic output path',
+    aecTag: 'HW-AEC LOCK',
+  },
+  {
+    id: 'speaker',
+    title: 'Phone Speaker',
+    subtitle: 'Hands-free loudspeaker with echo cancellation',
+    aecTag: 'AEC ACTIVE',
+  },
+  {
+    id: 'earpiece',
+    title: 'Earpiece',
+    subtitle: 'Discreet close-ear private call output',
+    aecTag: 'AEC ACTIVE',
+  },
+  {
+    id: 'wired',
+    title: 'Wired Headset',
+    subtitle: 'USB-C or 3.5mm headset microphone & audio',
+    aecTag: 'DIRECT PATH',
+  },
+  {
+    id: 'bluetooth',
+    title: 'Bluetooth Audio',
+    subtitle: 'SCO / BLE wireless buds & headset audio',
+    aecTag: 'AEC SUPPORTED',
+  },
+];
+
+const SpeakerGlyph = memo(({ color, size = 15 }: { color: string; size?: number }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"
+      stroke={color}
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </Svg>
+));
+
+const CheckGlyph = memo(({ color, size = 12 }: { color: string; size?: number }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M5 13l4 4L19 7"
+      stroke={color}
+      strokeWidth={3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </Svg>
+));
+
+const EndCallGlyph = memo(({ color, size = 18 }: { color: string; size?: number }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <Path
+      d="M12 9c-3.7 0-7.1 1.2-9.9 3.3-.6.5-.8 1.3-.4 2l1.6 2.8c.4.7 1.3.9 2 .4 1.3-.9 2.9-1.5 4.7-1.7V13c0-.5.4-1 1-1h2c.6 0 1 .5 1 1v2.8c1.8.2 3.4.8 4.7 1.7.7.5 1.6.3 2-.4l1.6-2.8c.4-.7.2-1.5-.4-2C19.1 10.2 15.7 9 12 9z"
+      fill={color}
+    />
+  </Svg>
+));
 
 interface CaptionItemProps {
   turn: LiveCaptionTurn;
@@ -49,6 +133,7 @@ interface CaptionItemProps {
   assistantBgStyle: object;
   textStyle: object;
   metaTextStyle: object;
+  accentTextStyle: object;
 }
 
 const CaptionItem = memo(
@@ -58,6 +143,7 @@ const CaptionItem = memo(
     assistantBgStyle,
     textStyle,
     metaTextStyle,
+    accentTextStyle,
   }: CaptionItemProps) => {
     const isUser = turn.role === 'user';
     return (
@@ -67,8 +153,12 @@ const CaptionItem = memo(
           isUser ? styles.captionBubbleUser : styles.captionBubbleAssistant,
           isUser ? userBgStyle : assistantBgStyle,
         ]}>
-        <Text style={[styles.captionRoleLabel, metaTextStyle]}>
-          {isUser ? 'You' : turn.wasInterrupted ? 'Assistant (Interrupted)' : 'Assistant'}
+        <Text
+          style={[
+            styles.captionRoleLabel,
+            isUser ? metaTextStyle : accentTextStyle,
+          ]}>
+          {isUser ? 'YOU' : turn.wasInterrupted ? 'ASSISTANT • INTERRUPTED' : 'ASSISTANT'}
         </Text>
         <Text style={[styles.captionText, textStyle]}>{turn.text}</Text>
       </View>
@@ -76,16 +166,169 @@ const CaptionItem = memo(
   }
 );
 
+interface SpeakerCardProps {
+  voice: PhononVoiceOption;
+  selected: boolean;
+  isTablet: boolean;
+  cardStyle: object;
+  selectedCardStyle: object;
+  avatarStyle: object;
+  selectedAvatarStyle: object;
+  titleStyle: object;
+  subStyle: object;
+  accentStyle: object;
+  onSelect: (voiceId: string) => void;
+}
+
+const SpeakerCard = memo(
+  ({
+    voice,
+    selected,
+    isTablet,
+    cardStyle,
+    selectedCardStyle,
+    avatarStyle,
+    selectedAvatarStyle,
+    titleStyle,
+    subStyle,
+    accentStyle,
+    onSelect,
+  }: SpeakerCardProps) => {
+    const handlePress = useCallback(() => {
+      onSelect(voice.id);
+    }, [onSelect, voice.id]);
+
+    return (
+      <Pressable
+        onPress={handlePress}
+        accessibilityRole="button"
+        accessibilityState={{ selected }}
+        accessibilityLabel={`Voice ${voice.label}, ${voice.description}`}
+        style={[
+          styles.speakerCard,
+          isTablet ? styles.speakerCardTablet : null,
+          cardStyle,
+          selected ? selectedCardStyle : null,
+        ]}>
+        <View style={styles.speakerCardTop}>
+          <View style={styles.speakerTitleGroup}>
+            <View style={[styles.speakerAvatar, avatarStyle, selected ? selectedAvatarStyle : null]}>
+              <Text style={[styles.speakerAvatarText, selected ? accentStyle : titleStyle]}>
+                {voice.label.charAt(0)}
+              </Text>
+            </View>
+            <Text style={[styles.speakerName, titleStyle]}>{voice.label}</Text>
+          </View>
+          {selected ? (
+            <View style={styles.speakerCheckActive}>
+              <CheckGlyph color="#002113" size={11} />
+            </View>
+          ) : (
+            <View style={styles.speakerRadioIdle} />
+          )}
+        </View>
+        <Text numberOfLines={1} style={[styles.speakerDesc, subStyle]}>
+          {voice.description}
+        </Text>
+        <View style={styles.speakerFooter}>
+          <Text style={[styles.speakerMeta, selected ? accentStyle : subStyle]}>
+            {selected ? '● ACTIVE' : voice.downloaded ? 'LOCAL READY' : '24KHZ PCM'}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  }
+);
+
+interface RouteOptionRowProps {
+  item: RouteOptionSpec;
+  selected: boolean;
+  enabled: boolean;
+  rowStyle: object;
+  selectedRowStyle: object;
+  titleStyle: object;
+  subStyle: object;
+  tagStyle: object;
+  selectedTagStyle: object;
+  accentStyle: object;
+  onSelect: (route: LiveOutputRoute) => void;
+}
+
+const RouteOptionRow = memo(
+  ({
+    item,
+    selected,
+    enabled,
+    rowStyle,
+    selectedRowStyle,
+    titleStyle,
+    subStyle,
+    tagStyle,
+    selectedTagStyle,
+    accentStyle,
+    onSelect,
+  }: RouteOptionRowProps) => {
+    const handlePress = useCallback(() => {
+      if (enabled) {
+        onSelect(item.id);
+      }
+    }, [enabled, item.id, onSelect]);
+
+    return (
+      <Pressable
+        onPress={handlePress}
+        disabled={!enabled}
+        accessibilityRole="button"
+        accessibilityState={{ selected, disabled: !enabled }}
+        style={[
+          styles.routeRow,
+          rowStyle,
+          selected ? selectedRowStyle : null,
+          !enabled ? styles.routeRowDisabled : null,
+        ]}>
+        <View style={styles.routeRowLeft}>
+          <View style={[styles.radioOuter, selected ? styles.radioOuterActive : null]}>
+            {selected ? <View style={styles.radioInner} /> : null}
+          </View>
+          <View style={styles.routeTextCol}>
+            <View style={styles.routeTitleRow}>
+              <Text style={[styles.routeTitle, titleStyle]}>{item.title}</Text>
+              {item.id === 'auto' ? (
+                <View style={styles.recommendedBadge}>
+                  <Text style={[styles.recommendedBadgeText, accentStyle]}>RECOMMENDED</Text>
+                </View>
+              ) : null}
+            </View>
+            <Text style={[styles.routeSubtitle, subStyle]}>
+              {enabled ? item.subtitle : 'Not currently connected'}
+            </Text>
+          </View>
+        </View>
+        <View style={[styles.routeTagPill, tagStyle, selected ? selectedTagStyle : null]}>
+          <Text style={[styles.routeTagText, selected ? accentStyle : subStyle]}>
+            {enabled ? item.aecTag : 'OFFLINE'}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  }
+);
+
+function formatMegabytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0.0';
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
 function getRouteLabel(route: LiveOutputRoute, preferred: LiveOutputRoute): string {
   if (preferred === 'auto') {
     if (route === 'bluetooth') return 'Auto (BT)';
     if (route === 'wired') return 'Auto (Headset)';
-    if (route === 'earpiece') return 'Auto (Earpiece)';
-    return 'Auto (Speaker)';
+    if (route === 'earpiece') return 'Auto (Ear)';
+    return 'Speaker';
   }
   switch (route) {
     case 'bluetooth':
-      return 'Bluetooth';
+      return 'BT Audio';
     case 'wired':
       return 'Headset';
     case 'earpiece':
@@ -96,19 +339,19 @@ function getRouteLabel(route: LiveOutputRoute, preferred: LiveOutputRoute): stri
 }
 
 function getStateTitle(state: LiveTalkSliceState): string {
-  if (state.isStarting) return 'Preparing Live Voice...';
+  if (state.isStarting) return 'Initializing Audio Pipeline...';
   if (state.isMuted) return 'Microphone Muted';
   switch (state.sessionState) {
     case 'LISTENING':
       return state.vadSpeechActive ? 'Listening to You...' : 'Listening';
     case 'THINKING':
-      return 'Thinking...';
+      return 'Processing Thought...';
     case 'SPEAKING':
       return 'Speaking (Tap or Speak to Interrupt)';
     case 'INTERRUPTED':
       return 'Interrupted';
     default:
-      return 'Ready';
+      return 'Ready for Voice';
   }
 }
 
@@ -118,20 +361,33 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
     modelName,
     micLevelSV,
     speakerLevelSV,
+    availableRoutes = ['speaker', 'earpiece'],
     onClose,
     onToggleMute,
     onInterrupt,
     onCommitTurn,
     onCycleRoute,
+    onSelectRoute,
     onRetry,
+    onDownloadPhonon,
+    onCancelPhononDownload,
+    onDeletePhonon,
+    onSelectTtsEngine,
+    onSelectVoice,
   }) => {
-    const { colors } = useTheme();
+    const { mode, colors } = useTheme();
     const insets = useSafeAreaInsets();
     const { width } = useWindowDimensions();
     const isTablet = (width || Dimensions.get('window').width) >= 768;
+    const isDark = mode === 'dark';
 
     const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
     const pulseSV = useSharedValue(1);
+    const downloadProgressSV = useSharedValue(0);
+
+    const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
+    const [isRouteSheetOpen, setIsRouteSheetOpen] = useState(false);
+    const [isBannerDismissed, setIsBannerDismissed] = useState(false);
 
     const isListening = liveTalk.sessionState === 'LISTENING';
     const isThinking = liveTalk.sessionState === 'THINKING';
@@ -141,6 +397,9 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
     useEffect(() => {
       if (!liveTalk.isVisible) {
         pulseSV.value = 1;
+        setIsVoiceStudioOpen(false);
+        setIsRouteSheetOpen(false);
+        setIsBannerDismissed(false);
         return;
       }
       if (isThinking) {
@@ -155,8 +414,8 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       } else if (isListening && !isMuted) {
         pulseSV.value = withRepeat(
           withSequence(
-            withTiming(1.04, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
-            withTiming(1.0, { duration: 1200, easing: Easing.inOut(Easing.ease) })
+            withTiming(1.05, { duration: 1150, easing: Easing.inOut(Easing.ease) }),
+            withTiming(1.0, { duration: 1150, easing: Easing.inOut(Easing.ease) })
           ),
           -1,
           true
@@ -175,7 +434,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       const scaleTarget = pulseSV.value + Math.min(0.42, level * 0.48);
       const opacityTarget = isMuted
         ? 0.08
-        : Math.min(0.45, 0.14 + level * 0.35 + (isThinking ? 0.1 : 0));
+        : Math.min(0.5, 0.16 + level * 0.36 + (isThinking ? 0.12 : 0));
       return {
         transform: [{ scale: scaleTarget }],
         opacity: opacityTarget,
@@ -194,78 +453,188 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       };
     }, [isListening, isMuted, isSpeaking]);
 
+    useEffect(() => {
+      const pct = Math.max(0, Math.min(100, liveTalk.phononDownload.percent || 0));
+      downloadProgressSV.value = withTiming(pct, { duration: 150 });
+    }, [downloadProgressSV, liveTalk.phononDownload.percent]);
+
+    const downloadFillAnimStyle = useAnimatedStyle(() => {
+      return {
+        width: `${Math.round(downloadProgressSV.value)}%`,
+      };
+    }, []);
+
     const dynamicStyles = useMemo(() => {
-      const orbSize = isTablet ? 184 : 148;
-      const haloSize = isTablet ? 256 : 206;
-      const contentMaxWidth = isTablet ? 600 : 480;
+      const orbSize = isTablet ? 176 : 142;
+      const haloSize = isTablet ? 248 : 200;
+      const innerOrbSize = isTablet ? 152 : 122;
+      const contentMaxWidth = isTablet ? 640 : 480;
+      const sheetMaxWidth = isTablet ? 580 : 480;
+
+      const bgCanvas = isDark ? '#090A0F' : colors.background;
+      const surfaceCard = isDark ? '#12131A' : colors.card;
+      const surfaceSheet = isDark ? '#1A1D27' : colors.background;
+      const surfaceElevated = isDark ? '#1E1F26' : '#FFFFFF';
+      const borderSubtle = isDark ? '#262A38' : colors.border;
+      const borderSheetGlow = isDark ? 'rgba(60, 221, 199, 0.28)' : colors.border;
+
+      const orbBorderColor = isMuted
+        ? colors.error
+        : isSpeaking
+        ? '#3CDDC7'
+        : isThinking
+        ? '#F59E0B'
+        : '#10B981';
+
+      const haloBgColor = isMuted
+        ? 'rgba(255, 69, 58, 0.18)'
+        : isSpeaking
+        ? 'rgba(60, 221, 199, 0.28)'
+        : isThinking
+        ? 'rgba(245, 158, 11, 0.25)'
+        : 'rgba(16, 185, 129, 0.24)';
 
       return StyleSheet.create({
         rootBackground: {
-          backgroundColor: colors.background,
-          paddingTop: Math.max(insets.top + 8, 20),
-          paddingBottom: Math.max(insets.bottom + 14, 24),
+          backgroundColor: bgCanvas,
+          paddingTop: Math.max(insets.top + 8, 18),
+          paddingBottom: Math.max(insets.bottom + 12, 20),
         },
         contentShell: {
           maxWidth: contentMaxWidth,
         },
+        sheetShell: {
+          maxWidth: sheetMaxWidth,
+          paddingBottom: Math.max(insets.bottom + 16, 22),
+        },
+        sheetContainer: {
+          backgroundColor: surfaceSheet,
+          borderColor: borderSheetGlow,
+        },
+        sheetScrim: {
+          backgroundColor: isDark ? 'rgba(9, 10, 15, 0.78)' : 'rgba(15, 23, 42, 0.5)',
+        },
         cardSurface: {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
+          backgroundColor: surfaceCard,
+          borderColor: borderSubtle,
+        },
+        elevatedPill: {
+          backgroundColor: isDark ? '#1A1B22' : colors.card,
+          borderColor: borderSubtle,
         },
         userCaptionSurface: {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
+          backgroundColor: surfaceElevated,
+          borderColor: borderSubtle,
         },
         assistantCaptionSurface: {
-          backgroundColor: 'transparent',
+          backgroundColor: surfaceCard,
+          borderLeftColor: isDark ? '#3CDDC7' : colors.primary,
+          borderColor: borderSubtle,
         },
         primaryText: {
-          color: colors.text,
+          color: isDark ? '#F8FAFC' : colors.text,
         },
         secondaryText: {
-          color: colors.secondaryText,
+          color: isDark ? '#94A3B8' : colors.secondaryText,
         },
-        accentText: {
-          color: colors.primary,
+        accentEmeraldText: {
+          color: isDark ? '#4EDEA3' : colors.primary,
+        },
+        accentTealText: {
+          color: isDark ? '#3CDDC7' : colors.primary,
         },
         errorBox: {
-          backgroundColor: colors.card,
+          backgroundColor: isDark ? 'rgba(147, 0, 10, 0.28)' : colors.card,
           borderColor: colors.error,
         },
         errorText: {
-          color: colors.error,
+          color: isDark ? '#FFB4AB' : colors.error,
         },
         orbHalo: {
           width: haloSize,
           height: haloSize,
           borderRadius: haloSize / 2,
-          backgroundColor: isSpeaking ? colors.primary : colors.headphoneBg,
+          backgroundColor: haloBgColor,
         },
         orbCore: {
           width: orbSize,
           height: orbSize,
           borderRadius: orbSize / 2,
-          backgroundColor: isSpeaking ? colors.primary : colors.headphoneBg,
+          backgroundColor: surfaceCard,
+          borderColor: orbBorderColor,
+        },
+        orbInnerCore: {
+          width: innerOrbSize,
+          height: innerOrbSize,
+          borderRadius: innerOrbSize / 2,
+          backgroundColor: isDark ? '#0D0E15' : colors.background,
+          borderColor: isDark ? 'rgba(60, 221, 199, 0.22)' : colors.border,
         },
         orbWrapperResponsive: {
-          minHeight: isTablet ? 270 : 220,
+          minHeight: isTablet ? 250 : 206,
         },
         muteBtnActive: {
-          backgroundColor: colors.error,
+          backgroundColor: 'rgba(255, 69, 58, 0.16)',
           borderColor: colors.error,
         },
-        primaryActionBtn: {
-          backgroundColor: colors.headphoneBg,
-          borderColor: colors.headphoneBg,
+        primaryTurnBtn: {
+          backgroundColor: isSpeaking || isThinking
+            ? 'rgba(16, 185, 129, 0.22)'
+            : 'rgba(16, 185, 129, 0.14)',
+          borderColor: '#10B981',
         },
-        primaryActionBtnText: {
-          color: colors.headphoneIcon,
+        endBtnSurface: {
+          backgroundColor: isDark ? 'rgba(147, 0, 10, 0.30)' : 'rgba(255, 59, 48, 0.10)',
+          borderColor: isDark ? 'rgba(255, 180, 171, 0.30)' : 'rgba(255, 59, 48, 0.30)',
+        },
+        endBtnText: {
+          color: isDark ? '#FFB4AB' : colors.error,
         },
         retryBtn: {
-          backgroundColor: colors.primary,
+          backgroundColor: '#10B981',
+        },
+        progressTrackSurface: {
+          backgroundColor: isDark ? '#242735' : colors.border,
+        },
+        progressFillSurface: {
+          backgroundColor: '#10B981',
+        },
+        segmentTrack: {
+          backgroundColor: bgCanvas,
+          borderColor: borderSubtle,
+        },
+        segmentSelected: {
+          backgroundColor: isDark ? '#242735' : '#FFFFFF',
+          borderColor: isDark ? 'rgba(60, 221, 199, 0.45)' : colors.primary,
+        },
+        segmentUnselected: {
+          backgroundColor: 'transparent',
+          borderColor: 'transparent',
+        },
+        speakerCardBase: {
+          backgroundColor: bgCanvas,
+          borderColor: borderSubtle,
+        },
+        speakerCardSelected: {
+          backgroundColor: isDark ? '#151B22' : colors.card,
+          borderColor: '#10B981',
+        },
+        speakerAvatarBase: {
+          backgroundColor: isDark ? '#242735' : colors.card,
+        },
+        speakerAvatarSelected: {
+          backgroundColor: 'rgba(16, 185, 129, 0.18)',
+        },
+        routeRowBase: {
+          backgroundColor: bgCanvas,
+          borderColor: borderSubtle,
+        },
+        routeRowSelected: {
+          backgroundColor: isDark ? '#242735' : colors.card,
+          borderColor: isDark ? 'rgba(60, 221, 199, 0.48)' : colors.primary,
         },
       });
-    }, [colors, insets.bottom, insets.top, isSpeaking, isTablet]);
+    }, [colors, insets.bottom, insets.top, isDark, isMuted, isSpeaking, isTablet, isThinking]);
 
     const handleOrbPress = useCallback(() => {
       if (liveTalk.isStarting) return;
@@ -286,9 +655,88 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       }
     }, [liveTalk.assistantTranscript, liveTalk.turns.length, liveTalk.userTranscript]);
 
-    const modeBadgeText = liveTalk.inputMode === 'audio_bytes' ? 'Native Audio' : 'Device Speech';
+    const handleOpenVoiceStudio = useCallback(() => {
+      setIsVoiceStudioOpen(true);
+    }, []);
+
+    const handleCloseVoiceStudio = useCallback(() => {
+      setIsVoiceStudioOpen(false);
+    }, []);
+
+    const handleOpenRouteSheet = useCallback(() => {
+      if (onSelectRoute) {
+        setIsRouteSheetOpen(true);
+      } else {
+        onCycleRoute();
+      }
+    }, [onCycleRoute, onSelectRoute]);
+
+    const handleCloseRouteSheet = useCallback(() => {
+      setIsRouteSheetOpen(false);
+    }, []);
+
+    const handleChooseRoute = useCallback(
+      (route: LiveOutputRoute) => {
+        onSelectRoute?.(route);
+        setIsRouteSheetOpen(false);
+      },
+      [onSelectRoute]
+    );
+
+    const handleDismissBanner = useCallback(() => {
+      setIsBannerDismissed(true);
+    }, []);
+
+    const handleDownloadPhononPress = useCallback(() => {
+      setIsBannerDismissed(false);
+      onDownloadPhonon('q4');
+    }, [onDownloadPhonon]);
+
+    const handleSelectPhononEngine = useCallback(() => {
+      onSelectTtsEngine('phonon_31m');
+    }, [onSelectTtsEngine]);
+
+    const handleSelectDeviceEngine = useCallback(() => {
+      onSelectTtsEngine('android_tts');
+    }, [onSelectTtsEngine]);
+
+    const handleConfirmDeletePhonon = useCallback(() => {
+      const mb = formatMegabytes(liveTalk.phononDiskBytes || liveTalk.phononExpectedBytes);
+      Alert.alert(
+        'Remove Phonon-31M Voice Model?',
+        `This frees ~${mb} MB of on-device storage and switches Live Voice Talk back to Device TTS.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Remove', style: 'destructive', onPress: onDeletePhonon },
+        ]
+      );
+    }, [liveTalk.phononDiskBytes, liveTalk.phononExpectedBytes, onDeletePhonon]);
+
+    const modeBadgeText = liveTalk.inputMode === 'audio_bytes' ? 'NATIVE AUDIO' : 'ON-DEVICE ASR';
     const routeText = getRouteLabel(liveTalk.activeRoute, liveTalk.preferredRoute);
     const statusTitle = getStateTitle(liveTalk);
+    const isUsingPhonon = liveTalk.ttsBackend === 'phonon_31m';
+    const activeVoiceLabel = useMemo(() => {
+      const found = liveTalk.availableVoices.find((v) => v.id === liveTalk.selectedVoiceId);
+      return found ? found.label : 'Easton';
+    }, [liveTalk.availableVoices, liveTalk.selectedVoiceId]);
+    const voicePillLabel = liveTalk.phononDownloading
+      ? `DL ${liveTalk.phononDownload.percent}%`
+      : isUsingPhonon
+      ? `${activeVoiceLabel} • Phonon`
+      : liveTalk.phononInstalled
+      ? 'Device TTS'
+      : 'Get Voice';
+    const expectedMbLabel = formatMegabytes(liveTalk.phononExpectedBytes);
+    const downloadedMbLabel = formatMegabytes(liveTalk.phononDownload.downloadedBytes);
+    const totalDownloadMbLabel = formatMegabytes(
+      liveTalk.phononDownload.totalBytes || liveTalk.phononExpectedBytes
+    );
+    const diskMbLabel = formatMegabytes(liveTalk.phononDiskBytes || liveTalk.phononExpectedBytes);
+    const showQuickBanner =
+      liveTalk.phononDownloading ||
+      !liveTalk.phononInstalled ||
+      !isBannerDismissed;
     const hasStreamingCaptions =
       liveTalk.turns.length > 0 ||
       liveTalk.userTranscript.length > 0 ||
@@ -302,28 +750,43 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
         onRequestClose={onClose}>
         <View style={[styles.container, dynamicStyles.rootBackground]}>
           <View style={[styles.shell, dynamicStyles.contentShell]}>
-            {/* Header Bar */}
+            {/* 1. Header Control Bar */}
             <View style={styles.header}>
               <View style={styles.headerLeft}>
-                <View style={[styles.badgePill, dynamicStyles.cardSurface]}>
-                  <Text numberOfLines={1} style={[styles.badgeModelText, dynamicStyles.primaryText]}>
+                <View style={[styles.brandPill, dynamicStyles.elevatedPill]}>
+                  <Text style={[styles.brandPillText, dynamicStyles.accentEmeraldText]}>AOTG</Text>
+                </View>
+                <View style={[styles.modelPill, dynamicStyles.cardSurface]}>
+                  <View style={styles.liveDot} />
+                  <Text numberOfLines={1} style={[styles.modelPillName, dynamicStyles.primaryText]}>
                     {modelName}
                   </Text>
-                </View>
-                <View style={[styles.badgePill, dynamicStyles.cardSurface]}>
-                  <Text style={[styles.badgeMetaText, dynamicStyles.accentText]}>
-                    {modeBadgeText}
-                  </Text>
+                  {isTablet ? (
+                    <Text style={[styles.modelPillMode, dynamicStyles.accentEmeraldText]}>
+                      {modeBadgeText}
+                    </Text>
+                  ) : null}
                 </View>
               </View>
 
               <View style={styles.headerRight}>
                 <Pressable
-                  onPress={onCycleRoute}
+                  onPress={handleOpenVoiceStudio}
                   accessibilityRole="button"
-                  accessibilityLabel="Switch audio output route"
-                  style={[styles.routeButton, dynamicStyles.cardSurface]}>
-                  <Text style={[styles.routeButtonText, dynamicStyles.primaryText]}>
+                  accessibilityLabel="Open Voice and Neural Engine Studio"
+                  style={[styles.headerActionPill, dynamicStyles.elevatedPill]}>
+                  <View style={isUsingPhonon ? styles.dotTeal : styles.dotAmber} />
+                  <Text numberOfLines={1} style={[styles.headerPillText, dynamicStyles.primaryText]}>
+                    {voicePillLabel}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleOpenRouteSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open Audio Output Route Picker"
+                  style={[styles.headerActionPill, dynamicStyles.elevatedPill]}>
+                  <SpeakerGlyph color={isDark ? '#4EDEA3' : colors.primary} size={14} />
+                  <Text numberOfLines={1} style={[styles.headerPillText, dynamicStyles.primaryText]}>
                     {routeText}
                   </Text>
                 </Pressable>
@@ -332,12 +795,12 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                   accessibilityRole="button"
                   accessibilityLabel="End live voice session"
                   style={[styles.closeButton, dynamicStyles.cardSurface]}>
-                  <CloseIcon size={18} color={colors.text} />
+                  <CloseIcon size={16} color={isDark ? '#E3E1EC' : colors.text} />
                 </Pressable>
               </View>
             </View>
 
-            {/* Reanimated Voice Orb Stage */}
+            {/* 2. Center Hero Stage (Dual-Halo Voice Orb) */}
             <View style={styles.orbSection}>
               <View style={[styles.orbWrapper, dynamicStyles.orbWrapperResponsive]}>
                 <Reanimated.View style={[styles.haloRing, dynamicStyles.orbHalo, outerHaloStyle]} />
@@ -348,26 +811,134 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     isSpeaking || isThinking ? 'Interrupt response' : 'Finish speaking turn'
                   }>
                   <Reanimated.View style={[styles.orbCore, dynamicStyles.orbCore, coreOrbAnimStyle]}>
-                    {liveTalk.isStarting || isThinking ? (
-                      <ActivityIndicator
-                        size="large"
-                        color={isSpeaking ? '#FFFFFF' : colors.headphoneIcon}
-                      />
-                    ) : isSpeaking ? (
-                      <LiveIcon size={isTablet ? 52 : 44} color="#FFFFFF" isAnimated={true} />
-                    ) : (
-                      <MicIcon size={isTablet ? 48 : 40} color={colors.headphoneIcon} />
-                    )}
+                    <View style={[styles.orbInnerCore, dynamicStyles.orbInnerCore]}>
+                      {liveTalk.isStarting || isThinking ? (
+                        <ActivityIndicator
+                          size="large"
+                          color={isThinking ? '#F59E0B' : '#10B981'}
+                        />
+                      ) : isSpeaking ? (
+                        <LiveIcon
+                          size={isTablet ? 52 : 44}
+                          color={isDark ? '#3CDDC7' : colors.primary}
+                          isAnimated={true}
+                        />
+                      ) : (
+                        <MicIcon
+                          size={isTablet ? 46 : 38}
+                          color={isMuted ? colors.error : isDark ? '#4EDEA3' : colors.primary}
+                        />
+                      )}
+                    </View>
                   </Reanimated.View>
                 </Pressable>
               </View>
 
               <Text style={[styles.statusTitle, dynamicStyles.primaryText]}>{statusTitle}</Text>
-              <Text style={[styles.statusSub, dynamicStyles.secondaryText]}>
-                {liveTalk.aecEnabled ? 'Hardware AEC Active' : 'Voice Channel Active'}
-                {liveTalk.vadBackend === 'silero_onnx' ? ' · Silero VAD' : ' · Adaptive VAD'}
+              <Text style={[styles.statusTelemetry, dynamicStyles.secondaryText]}>
+                {liveTalk.aecEnabled ? 'AEC ACTIVE' : 'VOICE CHANNEL'}
+                {liveTalk.vadBackend === 'silero_onnx' ? ' · SILERO VAD V5' : ' · ADAPTIVE VAD'}
+                {isUsingPhonon ? ` · PHONON (${activeVoiceLabel.toUpperCase()})` : ' · DEVICE TTS'}
               </Text>
             </View>
+
+            {/* 3. Compact Quick Voice Banner */}
+            {showQuickBanner ? (
+              <View style={[styles.voiceBanner, dynamicStyles.cardSurface]}>
+                {liveTalk.phononDownloading ? (
+                  <View style={styles.bannerDownloadCol}>
+                    <View style={styles.bannerTopRow}>
+                      <View style={styles.bannerLeftMeta}>
+                        <View style={styles.dotTeal} />
+                        <Text style={[styles.bannerTitle, dynamicStyles.primaryText]}>
+                          Downloading Phonon-31M ({liveTalk.phononDownload.percent}%)
+                        </Text>
+                      </View>
+                      <View style={styles.bannerActions}>
+                        <Pressable
+                          onPress={handleOpenVoiceStudio}
+                          accessibilityRole="button"
+                          style={[styles.bannerSmallBtn, dynamicStyles.elevatedPill]}>
+                          <Text style={[styles.bannerSmallBtnText, dynamicStyles.accentTealText]}>
+                            Details
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={onCancelPhononDownload}
+                          accessibilityRole="button"
+                          style={[styles.bannerSmallBtn, dynamicStyles.elevatedPill]}>
+                          <Text style={[styles.bannerSmallBtnText, dynamicStyles.errorText]}>
+                            Cancel
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                    <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
+                      {downloadedMbLabel} / {totalDownloadMbLabel} MB
+                      {liveTalk.phononDownload.currentFile ? ` · ${liveTalk.phononDownload.currentFile}` : ''}
+                    </Text>
+                    <View style={[styles.progressTrack, dynamicStyles.progressTrackSurface]}>
+                      <Reanimated.View
+                        style={[styles.progressFill, dynamicStyles.progressFillSurface, downloadFillAnimStyle]}
+                      />
+                    </View>
+                  </View>
+                ) : !liveTalk.phononInstalled ? (
+                  <View style={styles.bannerTopRow}>
+                    <Pressable onPress={handleOpenVoiceStudio} style={styles.bannerLeftCol}>
+                      <View style={styles.bannerTitleRow}>
+                        <View style={styles.dotEmerald} />
+                        <Text style={[styles.bannerTitle, dynamicStyles.primaryText]}>
+                          Phonon-31M Neural Voice (~{expectedMbLabel} MB)
+                        </Text>
+                      </View>
+                      <Text numberOfLines={1} style={[styles.bannerSub, dynamicStyles.secondaryText]}>
+                        {liveTalk.phononDownload.status === 'error' && liveTalk.phononDownload.error
+                          ? liveTalk.phononDownload.error
+                          : 'On-demand 24kHz CPU TTS with 8 local personas'}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleDownloadPhononPress}
+                      accessibilityRole="button"
+                      accessibilityLabel="Download Phonon-31M neural voice"
+                      style={[styles.bannerCtaBtn, dynamicStyles.retryBtn]}>
+                      <Text style={styles.bannerCtaText}>
+                        {liveTalk.phononDownload.status === 'error' ? 'Retry' : 'Download'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <View style={styles.bannerTopRow}>
+                    <Pressable onPress={handleOpenVoiceStudio} style={styles.bannerLeftMeta}>
+                      <View style={styles.dotEmerald} />
+                      <Text numberOfLines={1} style={[styles.bannerTitle, dynamicStyles.primaryText]}>
+                        {isUsingPhonon
+                          ? `Phonon Neural Ready · ${activeVoiceLabel}`
+                          : 'Device TTS Active · Switch to Phonon'}
+                      </Text>
+                    </Pressable>
+                    <View style={styles.bannerActions}>
+                      <Pressable
+                        onPress={handleOpenVoiceStudio}
+                        accessibilityRole="button"
+                        style={[styles.bannerSmallBtn, dynamicStyles.elevatedPill]}>
+                        <Text style={[styles.bannerSmallBtnText, dynamicStyles.accentTealText]}>
+                          Voices
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={handleDismissBanner}
+                        accessibilityRole="button"
+                        accessibilityLabel="Dismiss voice status banner"
+                        style={styles.bannerDismissBtn}>
+                        <CloseIcon size={13} color={isDark ? '#94A3B8' : colors.secondaryText} />
+                      </Pressable>
+                    </View>
+                  </View>
+                )}
+              </View>
+            ) : null}
 
             {/* Error Banner */}
             {liveTalk.error ? (
@@ -387,7 +958,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
               </View>
             ) : null}
 
-            {/* Plain-Text Streaming Captions */}
+            {/* 4. Streaming Conversation Captions */}
             <ScrollView
               ref={scrollRef}
               style={styles.captionScroll}
@@ -396,7 +967,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
               showsVerticalScrollIndicator={false}>
               {!hasStreamingCaptions ? (
                 <Text style={[styles.emptyCaptionHint, dynamicStyles.secondaryText]}>
-                  Speak naturally at any time. You can interrupt mid-response whenever you want.
+                  Speak naturally at any time. Your speech and the assistant stream live here with instant interruption support.
                 </Text>
               ) : null}
 
@@ -408,6 +979,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                   assistantBgStyle={dynamicStyles.assistantCaptionSurface}
                   textStyle={dynamicStyles.primaryText}
                   metaTextStyle={dynamicStyles.secondaryText}
+                  accentTextStyle={dynamicStyles.accentTealText}
                 />
               ))}
 
@@ -418,7 +990,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     styles.captionBubbleUser,
                     dynamicStyles.userCaptionSurface,
                   ]}>
-                  <Text style={[styles.captionRoleLabel, dynamicStyles.secondaryText]}>You</Text>
+                  <Text style={[styles.captionRoleLabel, dynamicStyles.secondaryText]}>YOU</Text>
                   <Text style={[styles.captionText, dynamicStyles.primaryText]}>
                     {liveTalk.userTranscript}
                   </Text>
@@ -432,9 +1004,12 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     styles.captionBubbleAssistant,
                     dynamicStyles.assistantCaptionSurface,
                   ]}>
-                  <Text style={[styles.captionRoleLabel, dynamicStyles.accentText]}>
-                    Assistant
-                  </Text>
+                  <View style={styles.assistantLabelRow}>
+                    <Text style={[styles.captionRoleLabel, dynamicStyles.accentTealText]}>
+                      ASSISTANT
+                    </Text>
+                    <View style={styles.dotTeal} />
+                  </View>
                   <Text style={[styles.captionText, dynamicStyles.primaryText]}>
                     {liveTalk.assistantTranscript}
                   </Text>
@@ -442,7 +1017,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
               ) : null}
             </ScrollView>
 
-            {/* Bottom Controls */}
+            {/* 5. Bottom Thumb-Zone Control Dock */}
             <View style={styles.controlsRow}>
               <Pressable
                 onPress={onToggleMute}
@@ -450,57 +1025,346 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                 accessibilityLabel={isMuted ? 'Unmute microphone' : 'Mute microphone'}
                 style={[
                   styles.controlBtn,
-                  isMuted ? dynamicStyles.muteBtnActive : dynamicStyles.cardSurface,
+                  dynamicStyles.cardSurface,
+                  isMuted ? dynamicStyles.muteBtnActive : null,
                 ]}>
-                <MicIcon size={20} color={isMuted ? '#FFFFFF' : colors.text} />
+                <MicIcon size={18} color={isMuted ? '#FFFFFF' : isDark ? '#94A3B8' : colors.text} />
                 <Text
                   style={[
                     styles.controlBtnText,
                     isMuted ? styles.whiteLabel : dynamicStyles.primaryText,
                   ]}>
-                  {isMuted ? 'Unmute' : 'Mute'}
+                  {isMuted ? 'Muted' : 'Mute'}
                 </Text>
               </Pressable>
 
-              {isSpeaking || isThinking ? (
-                <Pressable
-                  onPress={onInterrupt}
-                  accessibilityRole="button"
-                  accessibilityLabel="Interrupt assistant response"
-                  style={[styles.controlBtn, dynamicStyles.primaryActionBtn]}>
-                  <StopIcon color={colors.headphoneIcon} />
-                  <Text style={[styles.controlBtnText, dynamicStyles.primaryActionBtnText]}>
-                    Interrupt
-                  </Text>
-                </Pressable>
-              ) : (
-                <Pressable
-                  onPress={onCommitTurn}
-                  disabled={!isListening || isMuted || liveTalk.isStarting}
-                  accessibilityRole="button"
-                  accessibilityLabel="Send spoken turn now"
-                  style={[
-                    styles.controlBtn,
-                    dynamicStyles.primaryActionBtn,
-                    (!isListening || isMuted || liveTalk.isStarting) ? styles.controlBtnDisabled : null,
-                  ]}>
-                  <Text style={[styles.controlBtnText, dynamicStyles.primaryActionBtnText]}>
-                    Send Turn
-                  </Text>
-                </Pressable>
-              )}
+              <Pressable
+                onPress={handleOrbPress}
+                disabled={liveTalk.isStarting}
+                accessibilityRole="button"
+                accessibilityLabel={isSpeaking || isThinking ? 'Interrupt reply' : 'Finish speaking turn'}
+                style={[
+                  styles.controlBtnPrimary,
+                  dynamicStyles.primaryTurnBtn,
+                  liveTalk.isStarting ? styles.controlBtnDisabled : null,
+                ]}>
+                {isSpeaking || isThinking ? (
+                  <StopIcon size={14} radius={3} color={isDark ? '#4EDEA3' : colors.primary} />
+                ) : (
+                  <CheckGlyph color={isDark ? '#4EDEA3' : colors.primary} size={15} />
+                )}
+                <Text style={[styles.controlBtnTextStrong, dynamicStyles.accentEmeraldText]}>
+                  {isSpeaking || isThinking ? 'Interrupt' : 'Finish Turn'}
+                </Text>
+              </Pressable>
 
               <Pressable
                 onPress={onClose}
                 accessibilityRole="button"
                 accessibilityLabel="Close live voice talk"
-                style={[styles.controlBtn, dynamicStyles.cardSurface]}>
-                <CloseIcon size={16} color={colors.text} />
-                <Text style={[styles.controlBtnText, dynamicStyles.primaryText]}>End</Text>
+                style={[styles.controlBtn, dynamicStyles.endBtnSurface]}>
+                <EndCallGlyph color={isDark ? '#FFB4AB' : colors.error} size={17} />
+                <Text style={[styles.controlBtnText, dynamicStyles.endBtnText]}>End</Text>
               </Pressable>
             </View>
           </View>
         </View>
+
+        {/* Sub-Modal 1: Voice & Neural Engine Studio Sheet */}
+        <Modal
+          visible={liveTalk.isVisible && isVoiceStudioOpen}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={handleCloseVoiceStudio}>
+          <View style={[styles.sheetOverlay, dynamicStyles.sheetScrim]}>
+            <Pressable style={styles.sheetScrimSpacer} onPress={handleCloseVoiceStudio} />
+            <View style={[styles.sheetPanel, dynamicStyles.sheetContainer, dynamicStyles.sheetShell]}>
+              <View style={styles.sheetHandleWrap}>
+                <View style={styles.sheetHandle} />
+              </View>
+
+              <View style={styles.sheetHeader}>
+                <View style={styles.sheetHeaderLeft}>
+                  <View style={styles.sheetTitleRow}>
+                    <View style={styles.dotTeal} />
+                    <Text style={[styles.sheetTitle, dynamicStyles.primaryText]}>
+                      Voice & Neural Engine
+                    </Text>
+                  </View>
+                  <Text style={[styles.sheetSubtitle, dynamicStyles.secondaryText]}>
+                    LOCAL ON-DEVICE PHONON PIPELINE
+                  </Text>
+                </View>
+
+                <View style={styles.sheetHeaderRight}>
+                  <View style={[styles.storageBadge, dynamicStyles.elevatedPill]}>
+                    <Text style={[styles.storageBadgeText, dynamicStyles.accentTealText]}>
+                      {liveTalk.phononInstalled ? `${diskMbLabel} MB` : `${expectedMbLabel} MB`}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={handleCloseVoiceStudio}
+                    accessibilityRole="button"
+                    accessibilityLabel="Close Voice Studio"
+                    style={[styles.sheetCloseBtn, dynamicStyles.cardSurface]}>
+                    <CloseIcon size={14} color={isDark ? '#E3E1EC' : colors.text} />
+                  </Pressable>
+                </View>
+              </View>
+
+              <ScrollView
+                style={styles.sheetScroll}
+                contentContainerStyle={styles.sheetScrollContent}
+                showsVerticalScrollIndicator={false}>
+                {/* Engine Segmented Selector */}
+                <View style={[styles.engineSegmentTrack, dynamicStyles.segmentTrack]}>
+                  <Pressable
+                    onPress={handleSelectPhononEngine}
+                    accessibilityRole="button"
+                    accessibilityLabel="Select Phonon-31M Neural TTS"
+                    style={[
+                      styles.engineSegmentBtn,
+                      liveTalk.ttsEnginePref !== 'android_tts'
+                        ? dynamicStyles.segmentSelected
+                        : dynamicStyles.segmentUnselected,
+                    ]}>
+                    <Text
+                      style={[
+                        styles.engineSegmentText,
+                        liveTalk.ttsEnginePref !== 'android_tts'
+                          ? dynamicStyles.primaryText
+                          : dynamicStyles.secondaryText,
+                      ]}>
+                      Phonon-31M Neural
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={handleSelectDeviceEngine}
+                    accessibilityRole="button"
+                    accessibilityLabel="Select Android Device TTS"
+                    style={[
+                      styles.engineSegmentBtn,
+                      liveTalk.ttsEnginePref === 'android_tts'
+                        ? dynamicStyles.segmentSelected
+                        : dynamicStyles.segmentUnselected,
+                    ]}>
+                    <Text
+                      style={[
+                        styles.engineSegmentText,
+                        liveTalk.ttsEnginePref === 'android_tts'
+                          ? dynamicStyles.primaryText
+                          : dynamicStyles.secondaryText,
+                      ]}>
+                      Android Device TTS
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {/* Model Download / Checkpoint Status Card */}
+                <View style={[styles.studioTelemetryCard, dynamicStyles.cardSurface]}>
+                  {liveTalk.phononDownloading ? (
+                    <View style={styles.bannerDownloadCol}>
+                      <View style={styles.bannerTopRow}>
+                        <View style={styles.bannerLeftCol}>
+                          <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
+                            Phonon Acoustic Checkpoint (Q4)
+                          </Text>
+                          <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
+                            {downloadedMbLabel} / {totalDownloadMbLabel} MB ({liveTalk.phononDownload.percent}%)
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={onCancelPhononDownload}
+                          accessibilityRole="button"
+                          style={[styles.studioOutlineBtn, dynamicStyles.errorBox]}>
+                          <Text style={[styles.studioOutlineBtnText, dynamicStyles.errorText]}>
+                            Cancel
+                          </Text>
+                        </Pressable>
+                      </View>
+                      <View style={[styles.progressTrack, dynamicStyles.progressTrackSurface]}>
+                        <Reanimated.View
+                          style={[styles.progressFill, dynamicStyles.progressFillSurface, downloadFillAnimStyle]}
+                        />
+                      </View>
+                    </View>
+                  ) : liveTalk.phononInstalled ? (
+                    <View style={styles.bannerTopRow}>
+                      <View style={styles.bannerLeftCol}>
+                        <View style={styles.bannerTitleRow}>
+                          <View style={styles.dotEmerald} />
+                          <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
+                            Phonon-31M {liveTalk.phononVariant ? liveTalk.phononVariant.toUpperCase() : 'Q4'} Installed
+                          </Text>
+                        </View>
+                        <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
+                          24kHz CPU Streaming · {diskMbLabel} MB Local
+                        </Text>
+                      </View>
+                      <Pressable
+                        onPress={handleConfirmDeletePhonon}
+                        accessibilityRole="button"
+                        accessibilityLabel="Remove Phonon model weights"
+                        style={[styles.studioOutlineBtn, dynamicStyles.elevatedPill]}>
+                        <Text style={[styles.studioOutlineBtnText, dynamicStyles.errorText]}>
+                          Remove
+                        </Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <View style={styles.bannerTopRow}>
+                      <View style={styles.bannerLeftCol}>
+                        <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
+                          Phonon Acoustic Checkpoint (Q4)
+                        </Text>
+                        <Text style={[styles.bannerSub, dynamicStyles.secondaryText]}>
+                          {liveTalk.phononDownload.status === 'error' && liveTalk.phononDownload.error
+                            ? liveTalk.phononDownload.error
+                            : `~${expectedMbLabel} MB download • Zero-egress CPU synthesis`}
+                        </Text>
+                      </View>
+                      <Pressable
+                        onPress={handleDownloadPhononPress}
+                        accessibilityRole="button"
+                        style={[styles.bannerCtaBtn, dynamicStyles.retryBtn]}>
+                        <Text style={styles.bannerCtaText}>
+                          {liveTalk.phononDownload.status === 'error' ? 'Retry' : 'Download'}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  )}
+                </View>
+
+                {/* 2-Column Speaker Persona Grid */}
+                <View style={styles.personaSectionHeader}>
+                  <Text style={[styles.personaSectionTitle, dynamicStyles.secondaryText]}>
+                    ACTIVE ACOUSTIC PERSONA
+                  </Text>
+                  <View style={[styles.presetCountBadge, dynamicStyles.elevatedPill]}>
+                    <Text style={[styles.presetCountText, dynamicStyles.secondaryText]}>
+                      {liveTalk.availableVoices.length} PRESETS
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.speakerGrid}>
+                  {liveTalk.availableVoices.map((voice) => (
+                    <SpeakerCard
+                      key={voice.id}
+                      voice={voice}
+                      selected={liveTalk.selectedVoiceId === voice.id}
+                      isTablet={isTablet}
+                      cardStyle={dynamicStyles.speakerCardBase}
+                      selectedCardStyle={dynamicStyles.speakerCardSelected}
+                      avatarStyle={dynamicStyles.speakerAvatarBase}
+                      selectedAvatarStyle={dynamicStyles.speakerAvatarSelected}
+                      titleStyle={dynamicStyles.primaryText}
+                      subStyle={dynamicStyles.secondaryText}
+                      accentStyle={dynamicStyles.accentEmeraldText}
+                      onSelect={onSelectVoice}
+                    />
+                  ))}
+                </View>
+              </ScrollView>
+
+              <View style={styles.sheetFooter}>
+                <Pressable
+                  onPress={handleCloseVoiceStudio}
+                  accessibilityRole="button"
+                  style={[styles.sheetPrimaryCta, dynamicStyles.retryBtn]}>
+                  <Text style={styles.sheetPrimaryCtaText}>Done</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Sub-Modal 2: Audio Output Route Picker Sheet */}
+        <Modal
+          visible={liveTalk.isVisible && isRouteSheetOpen}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={handleCloseRouteSheet}>
+          <View style={[styles.sheetOverlay, dynamicStyles.sheetScrim]}>
+            <Pressable style={styles.sheetScrimSpacer} onPress={handleCloseRouteSheet} />
+            <View style={[styles.sheetPanel, dynamicStyles.sheetContainer, dynamicStyles.sheetShell]}>
+              <View style={styles.sheetHandleWrap}>
+                <View style={styles.sheetHandle} />
+              </View>
+
+              <View style={styles.sheetHeader}>
+                <View style={styles.sheetHeaderLeft}>
+                  <View style={styles.sheetTitleRow}>
+                    <SpeakerGlyph color={isDark ? '#3CDDC7' : colors.primary} size={17} />
+                    <Text style={[styles.sheetTitle, dynamicStyles.primaryText]}>
+                      Audio Output Route
+                    </Text>
+                  </View>
+                  <Text style={[styles.sheetSubtitle, dynamicStyles.secondaryText]}>
+                    HARDWARE ACOUSTIC ECHO CANCELLATION
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={handleCloseRouteSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close Audio Route Picker"
+                  style={[styles.sheetCloseBtn, dynamicStyles.cardSurface]}>
+                  <CloseIcon size={14} color={isDark ? '#E3E1EC' : colors.text} />
+                </Pressable>
+              </View>
+
+              <View style={[styles.aecBanner, dynamicStyles.cardSurface]}>
+                <View style={styles.bannerLeftMeta}>
+                  <View style={styles.dotEmerald} />
+                  <Text style={[styles.aecBannerText, dynamicStyles.primaryText]}>
+                    {liveTalk.aecEnabled ? 'Hardware AEC + Silero VAD Locked' : 'VoiceCommunication Stream Active'}
+                  </Text>
+                </View>
+                <View style={[styles.storageBadge, dynamicStyles.elevatedPill]}>
+                  <Text style={[styles.storageBadgeText, dynamicStyles.accentTealText]}>
+                    LOW DRIFT
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.routeList}>
+                {ROUTE_OPTIONS.map((item) => {
+                  const isAvailable =
+                    item.id === 'auto' ||
+                    item.id === 'speaker' ||
+                    item.id === 'earpiece' ||
+                    availableRoutes.includes(item.id);
+                  const isSelected = liveTalk.preferredRoute === item.id;
+                  return (
+                    <RouteOptionRow
+                      key={item.id}
+                      item={item}
+                      selected={isSelected}
+                      enabled={isAvailable}
+                      rowStyle={dynamicStyles.routeRowBase}
+                      selectedRowStyle={dynamicStyles.routeRowSelected}
+                      titleStyle={dynamicStyles.primaryText}
+                      subStyle={dynamicStyles.secondaryText}
+                      tagStyle={dynamicStyles.elevatedPill}
+                      selectedTagStyle={dynamicStyles.segmentSelected}
+                      accentStyle={dynamicStyles.accentTealText}
+                      onSelect={handleChooseRoute}
+                    />
+                  );
+                })}
+              </View>
+
+              <View style={styles.sheetFooter}>
+                <Pressable
+                  onPress={handleCloseRouteSheet}
+                  accessibilityRole="button"
+                  style={[styles.sheetSecondaryCta, dynamicStyles.elevatedPill]}>
+                  <Text style={[styles.sheetSecondaryCtaText, dynamicStyles.primaryText]}>Done</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </Modal>
     );
   }
@@ -510,7 +1374,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     alignItems: 'center',
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
   },
   shell: {
     flex: 1,
@@ -521,61 +1385,106 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   headerLeft: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    minWidth: 0,
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
-  badgePill: {
+  brandPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  brandPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  modelPill: {
+    flexShrink: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 14,
+    borderRadius: 999,
     borderWidth: 1,
-    maxWidth: 160,
   },
-  badgeModelText: {
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#10B981',
+  },
+  modelPillName: {
     fontSize: 12,
     fontWeight: '600',
+    flexShrink: 1,
   },
-  badgeMetaText: {
+  modelPillMode: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  headerActionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    maxWidth: 124,
+  },
+  headerPillText: {
     fontSize: 11,
     fontWeight: '600',
   },
-  routeButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  routeButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
   closeButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  dotEmerald: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#10B981',
+  },
+  dotTeal: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#3CDDC7',
+  },
+  dotAmber: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#F59E0B',
   },
   orbSection: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 18,
+    paddingVertical: 8,
   },
   orbWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 220,
     width: '100%',
   },
   haloRing: {
@@ -584,25 +1493,116 @@ const styles = StyleSheet.create({
   orbCore: {
     justifyContent: 'center',
     alignItems: 'center',
-    elevation: 6,
+    borderWidth: 2,
+    elevation: 10,
+  },
+  orbInnerCore: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
   },
   statusTitle: {
     fontSize: 18,
     fontWeight: '700',
-    marginTop: 8,
+    marginTop: 6,
     textAlign: 'center',
+    letterSpacing: -0.2,
   },
-  statusSub: {
-    fontSize: 12,
+  statusTelemetry: {
+    fontSize: 10,
+    fontWeight: '600',
     marginTop: 4,
     textAlign: 'center',
+    letterSpacing: 0.8,
+  },
+  voiceBanner: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 8,
+  },
+  bannerDownloadCol: {
+    gap: 6,
+  },
+  bannerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  bannerLeftCol: {
+    flex: 1,
+  },
+  bannerLeftMeta: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bannerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  bannerTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  bannerSub: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  bannerSubMono: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  bannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  bannerCtaBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  bannerCtaText: {
+    color: '#002113',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  bannerSmallBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  bannerSmallBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  bannerDismissBtn: {
+    padding: 4,
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
   },
   errorBanner: {
     borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 14,
+    borderRadius: 14,
+    paddingHorizontal: 12,
     paddingVertical: 10,
-    marginBottom: 10,
+    marginBottom: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -610,17 +1610,17 @@ const styles = StyleSheet.create({
   },
   errorBannerText: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '500',
   },
   retryButton: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderRadius: 999,
   },
   retryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 12,
+    color: '#002113',
+    fontSize: 11,
     fontWeight: '700',
   },
   captionScroll: {
@@ -631,50 +1631,72 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyCaptionHint: {
-    fontSize: 14,
-    lineHeight: 21,
+    fontSize: 13,
+    lineHeight: 20,
     textAlign: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 22,
     paddingTop: 18,
   },
   captionBubble: {
     paddingHorizontal: 14,
     paddingVertical: 10,
-    borderRadius: 16,
   },
   captionBubbleUser: {
     alignSelf: 'flex-end',
-    maxWidth: '84%',
+    maxWidth: '85%',
+    borderRadius: 18,
+    borderBottomRightRadius: 4,
     borderWidth: 1,
   },
   captionBubbleAssistant: {
     alignSelf: 'flex-start',
-    maxWidth: '94%',
-    paddingHorizontal: 4,
+    maxWidth: '92%',
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: 14,
+    borderLeftWidth: 2.5,
+    borderTopWidth: 1,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+  },
+  assistantLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
   },
   captionRoleLabel: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     marginBottom: 3,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0.7,
   },
   captionText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 14,
+    lineHeight: 21,
   },
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
-    paddingTop: 12,
+    paddingTop: 10,
   },
   controlBtn: {
     flex: 1,
-    minHeight: 50,
-    borderRadius: 25,
+    minHeight: 48,
+    borderRadius: 999,
     borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+  },
+  controlBtnPrimary: {
+    flex: 1.35,
+    minHeight: 50,
+    borderRadius: 999,
+    borderWidth: 1.5,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -682,14 +1704,364 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   controlBtnText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+  },
+  controlBtnTextStrong: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   controlBtnDisabled: {
     opacity: 0.45,
   },
   whiteLabel: {
     color: '#FFFFFF',
+  },
+  sheetOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  sheetScrimSpacer: {
+    flex: 1,
+    width: '100%',
+  },
+  sheetPanel: {
+    width: '100%',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    maxHeight: '86%',
+    overflow: 'hidden',
+    elevation: 20,
+  },
+  sheetHandleWrap: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  sheetHandle: {
+    width: 42,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(60, 221, 199, 0.42)',
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingTop: 6,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  sheetHeaderLeft: {
+    flex: 1,
+  },
+  sheetHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sheetTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sheetTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  sheetSubtitle: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.7,
+    marginTop: 2,
+  },
+  sheetCloseBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  storageBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  storageBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+  sheetScroll: {
+    maxHeight: 490,
+  },
+  sheetScrollContent: {
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+    gap: 12,
+  },
+  engineSegmentTrack: {
+    flexDirection: 'row',
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 4,
+    gap: 4,
+  },
+  engineSegmentBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 9,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  engineSegmentText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  studioTelemetryCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 13,
+  },
+  studioCardTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  studioOutlineBtn: {
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  studioOutlineBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  personaSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 2,
+  },
+  personaSectionTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  presetCountBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  presetCountText: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.4,
+  },
+  speakerGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  speakerCard: {
+    width: '48.2%',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 11,
+  },
+  speakerCardTablet: {
+    width: '48.8%',
+  },
+  speakerCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  speakerTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  speakerAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  speakerAvatarText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  speakerName: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  speakerCheckActive: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#10B981',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  speakerRadioIdle: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#4B5563',
+  },
+  speakerDesc: {
+    fontSize: 11,
+  },
+  speakerFooter: {
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(148, 163, 184, 0.14)',
+  },
+  speakerMeta: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  aecBanner: {
+    marginHorizontal: 18,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  aecBannerText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  routeList: {
+    paddingHorizontal: 18,
+    gap: 8,
+    paddingBottom: 10,
+  },
+  routeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    gap: 8,
+  },
+  routeRowDisabled: {
+    opacity: 0.45,
+  },
+  routeRowLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  radioOuter: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: '#64748B',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  radioOuterActive: {
+    borderColor: '#3CDDC7',
+  },
+  radioInner: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    backgroundColor: '#3CDDC7',
+  },
+  routeTextCol: {
+    flex: 1,
+  },
+  routeTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  routeTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  routeSubtitle: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  recommendedBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  recommendedBadgeText: {
+    color: '#4EDEA3',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  routeTagPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  routeTagText: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+  sheetFooter: {
+    paddingHorizontal: 18,
+    paddingTop: 10,
+  },
+  sheetPrimaryCta: {
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetPrimaryCtaText: {
+    color: '#002113',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  sheetSecondaryCta: {
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingVertical: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetSecondaryCtaText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 });
 

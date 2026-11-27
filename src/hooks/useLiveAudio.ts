@@ -12,19 +12,24 @@ import {
 } from '../store/slices/llmSlice';
 import {
   applyTranscriptDelta,
+  applyTtsCapabilities,
   closeLiveTalkModal,
   commitLiveTurn,
   LiveOutputRoute,
   LiveTalkState,
+  LiveTtsBackend,
+  LiveTtsEnginePref,
   LiveVadBackend,
   openLiveTalkModal,
   seedModalTurns,
   sessionStarted,
   setLiveTalkError,
   setMicMuted,
+  setPhononDownloadProgress,
   setPreferredRoute,
   setSessionStarting,
   setSessionState,
+  setTtsPreference,
   setVadSpeechActive,
   updateRouteOrFocus,
 } from '../store/slices/liveTalkSlice';
@@ -92,6 +97,11 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
   selectedModelRef.current = selectedModel;
   const activeBackendRef = useRef(activeBackend || 'GPU');
   activeBackendRef.current = activeBackend || 'GPU';
+  const ttsEnginePrefRef = useRef<LiveTtsEnginePref>(liveTalk.ttsEnginePref);
+  ttsEnginePrefRef.current = liveTalk.ttsEnginePref;
+  const selectedVoiceIdRef = useRef<string>(liveTalk.selectedVoiceId);
+  selectedVoiceIdRef.current = liveTalk.selectedVoiceId;
+  const prefsHydrationPromiseRef = useRef<Promise<{ ttsEngine: LiveTtsEnginePref; voiceId: string }> | null>(null);
 
   const cleanupListeners = useCallback(() => {
     unsubscribersRef.current.forEach((u) => u());
@@ -126,6 +136,19 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
   }, [cleanupListeners, dispatch, micLevelSV, speakerLevelSV]);
 
   useEffect(() => {
+    const p = liveAudioService.loadTtsPreferences().then((prefs) => {
+      ttsEnginePrefRef.current = prefs.ttsEngine;
+      selectedVoiceIdRef.current = prefs.voiceId;
+      dispatch(
+        setTtsPreference({
+          ttsEnginePref: prefs.ttsEngine,
+          selectedVoiceId: prefs.voiceId,
+        })
+      );
+      return prefs;
+    });
+    prefsHydrationPromiseRef.current = p;
+
     return () => {
       sessionAttemptIdRef.current += 1;
       cleanupListeners();
@@ -135,7 +158,56 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
         liveAudioService.stopSession().catch(() => {});
       }
     };
-  }, [cleanupListeners]);
+  }, [cleanupListeners, dispatch]);
+
+  useEffect(() => {
+    if (!liveTalk.isVisible || !liveAudioService.isSupported()) {
+      return;
+    }
+    let active = true;
+    (async () => {
+      try {
+        const prefs = prefsHydrationPromiseRef.current
+          ? await prefsHydrationPromiseRef.current
+          : await liveAudioService.loadTtsPreferences();
+        if (!active) return;
+        const caps = await liveAudioService.setTtsConfig(prefs.ttsEngine, prefs.voiceId);
+        if (active) {
+          dispatch(applyTtsCapabilities(caps));
+        }
+      } catch (err) {
+        console.warn('[useLiveAudio] Failed to sync TTS capabilities:', err);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [dispatch, liveTalk.isVisible]);
+
+  useEffect(() => {
+    if ((!liveTalk.isVisible && !liveTalk.phononDownloading) || !liveAudioService.isSupported()) {
+      return;
+    }
+    const unsubProgress = liveAudioService.onTtsDownloadProgress((ev) => {
+      dispatch(
+        setPhononDownloadProgress({
+          status: ev.status,
+          percent: ev.percent,
+          downloadedBytes: ev.downloadedBytes,
+          totalBytes: ev.totalBytes,
+          currentFile: ev.currentFile,
+          error: ev.error,
+        })
+      );
+    });
+    const unsubConfig = liveAudioService.onTtsConfigChanged((caps) => {
+      dispatch(applyTtsCapabilities(caps));
+    });
+    return () => {
+      unsubProgress();
+      unsubConfig();
+    };
+  }, [dispatch, liveTalk.isVisible, liveTalk.phononDownloading]);
 
   const checkMicPermission = useCallback(async (): Promise<'granted' | 'prompt' | 'denied'> => {
     if (Platform.OS !== 'android') {
@@ -245,8 +317,14 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
         }
       }
 
+      const prefs = prefsHydrationPromiseRef.current
+        ? await prefsHydrationPromiseRef.current
+        : { ttsEngine: ttsEnginePrefRef.current, voiceId: selectedVoiceIdRef.current };
+      if (sessionAttemptIdRef.current !== attemptId) return;
+
       const caps = await liveAudioService.getCapabilities();
       if (sessionAttemptIdRef.current !== attemptId) return;
+      dispatch(applyTtsCapabilities(caps));
       if (caps.availableRoutes?.length) {
         setAvailableRoutes(caps.availableRoutes);
       }
@@ -358,6 +436,8 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
         vadSensitivity: 0.55,
         speakerRoute: liveTalk.preferredRoute,
         disableVision: true,
+        ttsEngine: prefs.ttsEngine,
+        voiceId: prefs.voiceId,
       });
 
       if (sessionAttemptIdRef.current !== attemptId) {
@@ -373,6 +453,8 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
           vadBackend: (startRes.vadBackend as LiveVadBackend) || 'dsp_fallback',
           activeRoute: (startRes.activeRoute as LiveOutputRoute) || 'speaker',
           aecEnabled: startRes.aecEnabled,
+          ttsBackend: (startRes.ttsBackend === 'phonon_31m' ? 'phonon_31m' : 'android_tts') as LiveTtsBackend,
+          voiceId: startRes.voiceId || prefs.voiceId,
         })
       );
       dispatch(setVadSpeechActive(false));
@@ -523,6 +605,117 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
     }
   }, [availableRoutes, dispatch, liveTalk.preferredRoute]);
 
+  const downloadPhononModel = useCallback(
+    async (variant: 'q4' | 'fp32' = 'q4') => {
+      if (!liveAudioService.isSupported()) return;
+      const voiceId = selectedVoiceIdRef.current || 'easton';
+      dispatch(
+        setPhononDownloadProgress({
+          status: 'downloading',
+          percent: 0,
+          downloadedBytes: 0,
+          totalBytes: liveTalk.phononExpectedBytes,
+          currentFile: null,
+          error: null,
+        })
+      );
+      try {
+        const ok = await liveAudioService.downloadPhononModel(variant, voiceId);
+        if (ok) {
+          ttsEnginePrefRef.current = 'phonon_31m';
+          dispatch(setTtsPreference({ ttsEnginePref: 'phonon_31m', selectedVoiceId: voiceId }));
+          await liveAudioService.saveTtsPreferences({ ttsEngine: 'phonon_31m', voiceId });
+          const caps = await liveAudioService.setTtsConfig('phonon_31m', voiceId);
+          dispatch(applyTtsCapabilities(caps));
+        } else {
+          const caps = await liveAudioService.getCapabilities();
+          dispatch(applyTtsCapabilities(caps));
+        }
+      } catch (err: any) {
+        dispatch(
+          setPhononDownloadProgress({
+            status: 'error',
+            percent: 0,
+            downloadedBytes: 0,
+            totalBytes: liveTalk.phononExpectedBytes,
+            currentFile: null,
+            error: err?.message || 'Failed to download Phonon-31M.',
+          })
+        );
+      }
+    },
+    [dispatch, liveTalk.phononExpectedBytes]
+  );
+
+  const cancelPhononDownload = useCallback(async () => {
+    try {
+      await liveAudioService.cancelPhononDownload();
+    } catch (err) {
+      console.warn('[useLiveAudio] cancelPhononDownload error:', err);
+    }
+  }, []);
+
+  const deletePhononModel = useCallback(async () => {
+    try {
+      const voiceId = selectedVoiceIdRef.current || 'easton';
+      ttsEnginePrefRef.current = 'auto';
+      dispatch(setTtsPreference({ ttsEnginePref: 'auto' }));
+      await liveAudioService.saveTtsPreferences({ ttsEngine: 'auto', voiceId });
+      await liveAudioService.deletePhononModel();
+      const caps = await liveAudioService.getCapabilities();
+      dispatch(applyTtsCapabilities(caps));
+    } catch (err) {
+      console.warn('[useLiveAudio] deletePhononModel error:', err);
+    }
+  }, [dispatch]);
+
+  const selectTtsEngine = useCallback(
+    async (engine: LiveTtsEnginePref) => {
+      const voiceId = selectedVoiceIdRef.current || 'easton';
+      ttsEnginePrefRef.current = engine;
+      dispatch(setTtsPreference({ ttsEnginePref: engine }));
+      await liveAudioService.saveTtsPreferences({ ttsEngine: engine, voiceId });
+      try {
+        const caps = await liveAudioService.setTtsConfig(engine, voiceId);
+        dispatch(applyTtsCapabilities(caps));
+      } catch (err) {
+        console.warn('[useLiveAudio] selectTtsEngine error:', err);
+      }
+    },
+    [dispatch]
+  );
+
+  const selectVoice = useCallback(
+    async (voiceId: string) => {
+      const engine =
+        ttsEnginePrefRef.current === 'android_tts' ? 'phonon_31m' : ttsEnginePrefRef.current;
+      ttsEnginePrefRef.current = engine;
+      selectedVoiceIdRef.current = voiceId;
+      dispatch(setTtsPreference({ ttsEnginePref: engine, selectedVoiceId: voiceId }));
+      await liveAudioService.saveTtsPreferences({ ttsEngine: engine, voiceId });
+      try {
+        const caps = await liveAudioService.setTtsConfig(engine, voiceId);
+        dispatch(applyTtsCapabilities(caps));
+      } catch (err) {
+        console.warn('[useLiveAudio] selectVoice error:', err);
+      }
+    },
+    [dispatch]
+  );
+
+  const selectOutputRoute = useCallback(
+    async (route: LiveOutputRoute) => {
+      dispatch(setPreferredRoute(route));
+      try {
+        const applied = await liveAudioService.setOutputRoute(route);
+        dispatch(updateRouteOrFocus({ route: (applied as LiveOutputRoute) || 'speaker' }));
+      } catch (err) {
+        console.warn('[useLiveAudio] selectOutputRoute error:', err);
+      }
+    },
+    [dispatch]
+  );
+
   return {
     liveTalk,
     selectedModel,
@@ -535,7 +728,13 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
     triggerInterrupt,
     commitManualTurn,
     cycleOutputRoute,
+    selectOutputRoute,
     retrySession: startNativeLiveSession,
+    downloadPhononModel,
+    cancelPhononDownload,
+    deletePhononModel,
+    selectTtsEngine,
+    selectVoice,
     micPermissionModal: {
       visible: micPermissionState.visible,
       isPermanentlyDenied: micPermissionState.isPermanentlyDenied,

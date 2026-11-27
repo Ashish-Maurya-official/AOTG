@@ -25,16 +25,20 @@ jest.mock('@reduxjs/toolkit', () => ({
 
 import reducer, {
   applyTranscriptDelta,
+  applyTtsCapabilities,
   closeLiveTalkModal,
   commitLiveTurn,
+  DEFAULT_PHONON_VOICES,
   openLiveTalkModal,
   seedModalTurns,
   sessionStarted,
   setLiveTalkError,
   setMicMuted,
+  setPhononDownloadProgress,
   setPreferredRoute,
   setSessionStarting,
   setSessionState,
+  setTtsPreference,
   setVadSpeechActive,
   updateRouteOrFocus,
 } from '../liveTalkSlice';
@@ -153,5 +157,79 @@ describe('liveTalkSlice', () => {
     expect(state.sessionState).toBe('IDLE');
     expect(state.isMuted).toBe(false);
     expect(state.error).toBeNull();
+  });
+
+  it('tracks Phonon-31M download progress, voice selection, and preserves install state on close', () => {
+    let state = reducer(undefined, openLiveTalkModal());
+    expect(state.phononInstalled).toBe(false);
+    expect(state.selectedVoiceId).toBe('easton');
+    expect(state.availableVoices).toHaveLength(DEFAULT_PHONON_VOICES.length);
+
+    state = reducer(
+      state,
+      setPhononDownloadProgress({
+        status: 'downloading',
+        percent: 42,
+        downloadedBytes: 28_000_000,
+        totalBytes: 68_565_296,
+        currentFile: 'onnx/mimi_decoder.onnx',
+      })
+    );
+    expect(state.phononDownloading).toBe(true);
+    expect(state.phononDownload.percent).toBe(42);
+    expect(state.phononInstalled).toBe(false);
+
+    state = reducer(
+      state,
+      setPhononDownloadProgress({
+        status: 'ready',
+        percent: 100,
+        downloadedBytes: 68_565_296,
+        totalBytes: 68_565_296,
+      })
+    );
+    expect(state.phononDownloading).toBe(false);
+    expect(state.phononInstalled).toBe(true);
+    expect(state.ttsBackend).toBe('phonon_31m');
+
+    state = reducer(
+      state,
+      setTtsPreference({ ttsEnginePref: 'phonon_31m', selectedVoiceId: 'juniper' })
+    );
+    expect(state.selectedVoiceId).toBe('juniper');
+
+    state = reducer(
+      state,
+      applyTtsCapabilities({
+        phononInstalled: true,
+        phononDownloading: false,
+        phononExpectedBytes: 68_565_296,
+        phononDiskBytes: 68_821_296,
+        phononVariant: 'q4',
+        selectedTtsEngine: 'android_tts',
+        selectedVoiceId: 'zoey',
+      })
+    );
+    expect(state.ttsEnginePref).toBe('android_tts');
+    expect(state.ttsBackend).toBe('android_tts');
+    expect(state.selectedVoiceId).toBe('zoey');
+
+    state = reducer(
+      state,
+      sessionStarted({
+        inputMode: 'audio_bytes',
+        vadBackend: 'silero_onnx',
+        activeRoute: 'speaker',
+        aecEnabled: true,
+        ttsBackend: 'phonon_31m',
+        voiceId: 'harper',
+      })
+    );
+    expect(state.ttsBackend).toBe('phonon_31m');
+    expect(state.selectedVoiceId).toBe('harper');
+
+    state = reducer(state, closeLiveTalkModal());
+    expect(state.phononInstalled).toBe(true);
+    expect(state.selectedVoiceId).toBe('harper');
   });
 });

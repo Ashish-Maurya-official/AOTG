@@ -26,6 +26,7 @@ jest.mock('../../native/turbo_modules/LiveAudio/NativeLiveAudio', () => ({
       inputMode: 'audio_bytes',
       vadBackend: 'silero_onnx',
       ttsBackend: 'android_tts',
+      voiceId: 'easton',
       activeRoute: 'speaker',
       aecEnabled: true,
       hwSampleRate: 48000,
@@ -44,6 +45,37 @@ jest.mock('../../native/turbo_modules/LiveAudio/NativeLiveAudio', () => ({
       isModelLoaded: true,
       modelSupportsAudio: true,
       availableRoutes: ['speaker', 'earpiece'],
+      phononInstalled: false,
+      phononDownloading: false,
+      phononExpectedBytes: 68_565_296,
+      phononDiskBytes: 0,
+      phononVariant: '',
+      selectedTtsEngine: 'auto',
+      selectedVoiceId: 'easton',
+      downloadedVoices: [],
+      availableVoices: [],
+    }),
+    downloadPhononModel: jest.fn().mockResolvedValue(true),
+    cancelPhononDownload: jest.fn().mockResolvedValue(true),
+    deletePhononModel: jest.fn().mockResolvedValue(true),
+    setTtsConfig: jest.fn().mockResolvedValue({
+      hasSileroModel: false,
+      hasDeviceAsr: true,
+      hasTtsEngine: true,
+      hasAcousticEchoCanceler: true,
+      hasNoiseSuppressor: true,
+      isModelLoaded: true,
+      modelSupportsAudio: true,
+      availableRoutes: ['speaker'],
+      phononInstalled: true,
+      phononDownloading: false,
+      phononExpectedBytes: 68_565_296,
+      phononDiskBytes: 68_565_296,
+      phononVariant: 'q4',
+      selectedTtsEngine: 'phonon_31m',
+      selectedVoiceId: 'juniper',
+      downloadedVoices: ['juniper'],
+      availableVoices: [],
     }),
     addListener: jest.fn(),
     removeListeners: jest.fn(),
@@ -84,6 +116,7 @@ jest.mock('@react-native-async-storage/async-storage', () => {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import NativeLLM from '../../native/turbo_modules/LLM/NativeLLM';
+import NativeLiveAudio from '../../native/turbo_modules/LiveAudio/NativeLiveAudio';
 import LLMService from '../llmService';
 import liveAudioService from '../liveAudioService';
 import documentService from '../documentService';
@@ -268,5 +301,36 @@ describe('Phase 1 Live Talk & LLM Service Contracts', () => {
 
     expect(empty.addedMessages).toHaveLength(0);
     expect(await loadSessions()).toHaveLength(0);
+  });
+
+  it('persists and restores Phonon TTS preferences and delegates native TTS config methods', async () => {
+    const defaults = await liveAudioService.loadTtsPreferences();
+    expect(defaults).toEqual({ ttsEngine: 'auto', voiceId: 'easton' });
+
+    await liveAudioService.saveTtsPreferences({
+      ttsEngine: 'phonon_31m',
+      voiceId: 'juniper',
+    });
+    const loaded = await liveAudioService.loadTtsPreferences();
+    expect(loaded).toEqual({ ttsEngine: 'phonon_31m', voiceId: 'juniper' });
+
+    await AsyncStorage.setItem('@aotg/live_tts_prefs', '{corrupt json');
+    const recovered = await liveAudioService.loadTtsPreferences();
+    expect(recovered).toEqual({ ttsEngine: 'auto', voiceId: 'easton' });
+
+    await expect(liveAudioService.downloadPhononModel('q4', 'juniper')).resolves.toBe(true);
+    expect(NativeLiveAudio?.downloadPhononModel).toHaveBeenCalledWith('q4', 'juniper');
+
+    const updatedCaps = await liveAudioService.setTtsConfig('phonon_31m', 'juniper');
+    expect(updatedCaps.phononInstalled).toBe(true);
+    expect(updatedCaps.selectedVoiceId).toBe('juniper');
+
+    await expect(liveAudioService.cancelPhononDownload()).resolves.toBe(true);
+    await expect(liveAudioService.deletePhononModel()).resolves.toBe(true);
+
+    const unsubProgress = liveAudioService.onTtsDownloadProgress(() => {});
+    const unsubConfig = liveAudioService.onTtsConfigChanged(() => {});
+    expect(() => unsubProgress()).not.toThrow();
+    expect(() => unsubConfig()).not.toThrow();
   });
 });

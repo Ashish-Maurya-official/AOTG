@@ -682,13 +682,20 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
         liveTalk,
         micLevelSV,
         speakerLevelSV,
+        availableRoutes,
         openLiveTalk,
         stopLiveSession,
         toggleMute,
         triggerInterrupt,
         commitManualTurn,
         cycleOutputRoute,
+        selectOutputRoute,
         retrySession,
+        downloadPhononModel,
+        cancelPhononDownload,
+        deletePhononModel,
+        selectTtsEngine,
+        selectVoice,
         micPermissionModal,
     } = useLiveAudio({
         activeSessionIdRef,
@@ -1632,21 +1639,28 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                     modelName={selectedModel.name}
                     micLevelSV={micLevelSV}
                     speakerLevelSV={speakerLevelSV}
+                    availableRoutes={availableRoutes}
                     onClose={stopLiveSession}
                     onToggleMute={toggleMute}
                     onInterrupt={triggerInterrupt}
                     onCommitTurn={commitManualTurn}
                     onCycleRoute={cycleOutputRoute}
+                    onSelectRoute={selectOutputRoute}
                     onRetry={retrySession}
+                    onDownloadPhonon={downloadPhononModel}
+                    onCancelPhononDownload={cancelPhononDownload}
+                    onDeletePhonon={deletePhononModel}
+                    onSelectTtsEngine={selectTtsEngine}
+                    onSelectVoice={selectVoice}
                 />
 
                 {/* Microphone Permission Prompt */}
                 <PermissionModal
                     visible={micPermissionModal.visible}
                     title="Microphone Permission Required"
-                    description="AOTG needs microphone access to run low-latency on-device voice conversations. Audio never leaves your device."
+                    description="AOTG processes speech directly on your NPU/CPU hardware. Raw audio never leaves your device."
                     isPermanentlyDenied={micPermissionModal.isPermanentlyDenied}
-                    icon={<MicIcon color={colors.text} size={32} />}
+                    icon={<MicIcon color={colors.primary} size={34} />}
                     onGrant={micPermissionModal.onGrant}
                     onCancel={micPermissionModal.onCancel}
                 />

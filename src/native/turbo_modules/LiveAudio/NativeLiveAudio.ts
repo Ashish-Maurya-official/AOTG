@@ -17,6 +17,8 @@ export interface LiveAudioSessionConfig {
   vadSensitivity: number;
   speakerRoute: string;
   disableVision: boolean;
+  ttsEngine?: string;
+  voiceId?: string;
 }
 
 export interface LiveAudioStartResult {
@@ -24,9 +26,17 @@ export interface LiveAudioStartResult {
   inputMode: string;
   vadBackend: string;
   ttsBackend: string;
+  voiceId: string;
   activeRoute: string;
   aecEnabled: boolean;
   hwSampleRate: number;
+}
+
+export interface PhononVoiceInfo {
+  id: string;
+  label: string;
+  description: string;
+  downloaded: boolean;
 }
 
 export interface LiveAudioCapabilities {
@@ -38,6 +48,15 @@ export interface LiveAudioCapabilities {
   isModelLoaded: boolean;
   modelSupportsAudio: boolean;
   availableRoutes: Array<string>;
+  phononInstalled: boolean;
+  phononDownloading: boolean;
+  phononExpectedBytes: number;
+  phononDiskBytes: number;
+  phononVariant: string;
+  selectedTtsEngine: string;
+  selectedVoiceId: string;
+  downloadedVoices: Array<string>;
+  availableVoices: Array<PhononVoiceInfo>;
 }
 
 export interface Spec extends TurboModule {
@@ -48,6 +67,10 @@ export interface Spec extends TurboModule {
   commitTurn(): Promise<boolean>;
   setOutputRoute(route: string): Promise<string>;
   getCapabilities(): Promise<LiveAudioCapabilities>;
+  downloadPhononModel(variant: string, voiceId: string): Promise<boolean>;
+  cancelPhononDownload(): Promise<boolean>;
+  deletePhononModel(): Promise<boolean>;
+  setTtsConfig(ttsEngine: string, voiceId: string): Promise<LiveAudioCapabilities>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }

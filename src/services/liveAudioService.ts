@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeEventEmitter, Platform } from 'react-native';
 import NativeLiveAudio, {
   LiveAudioCapabilities,
@@ -8,6 +9,8 @@ import {
   LiveInputMode,
   LiveOutputRoute,
   LiveTalkState,
+  LiveTtsEnginePref,
+  PhononDownloadStatus,
 } from '../store/slices/liveTalkSlice';
 import {
   ChatMessage,
@@ -57,6 +60,26 @@ export interface LiveErrorEvent {
   recoverable: boolean;
 }
 
+export interface TtsDownloadProgressEvent {
+  status: PhononDownloadStatus;
+  percent: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  currentFile?: string;
+  error?: string;
+}
+
+export interface LiveTtsPreferences {
+  ttsEngine: LiveTtsEnginePref;
+  voiceId: string;
+}
+
+const LIVE_TTS_PREFS_STORAGE_KEY = '@aotg/live_tts_prefs';
+const DEFAULT_TTS_PREFERENCES: LiveTtsPreferences = {
+  ttsEngine: 'auto',
+  voiceId: 'easton',
+};
+
 export interface PersistLiveTurnParams {
   sessionId: string | null;
   currentMessages: ChatMessage[];
@@ -100,9 +123,81 @@ class LiveAudioServiceImpl {
         isModelLoaded: false,
         modelSupportsAudio: false,
         availableRoutes: ['speaker'],
+        phononInstalled: false,
+        phononDownloading: false,
+        phononExpectedBytes: 68_565_296,
+        phononDiskBytes: 0,
+        phononVariant: '',
+        selectedTtsEngine: 'auto',
+        selectedVoiceId: 'easton',
+        downloadedVoices: [],
+        availableVoices: [],
       };
     }
     return NativeLiveAudio.getCapabilities();
+  }
+
+  public async downloadPhononModel(
+    variant: 'q4' | 'fp32' = 'q4',
+    voiceId: string = 'easton'
+  ): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.downloadPhononModel(variant, voiceId);
+  }
+
+  public async cancelPhononDownload(): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.cancelPhononDownload();
+  }
+
+  public async deletePhononModel(): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.deletePhononModel();
+  }
+
+  public async setTtsConfig(
+    ttsEngine: LiveTtsEnginePref,
+    voiceId: string
+  ): Promise<LiveAudioCapabilities> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return this.getCapabilities();
+    }
+    return NativeLiveAudio.setTtsConfig(ttsEngine, voiceId);
+  }
+
+  public async loadTtsPreferences(): Promise<LiveTtsPreferences> {
+    try {
+      const raw = await AsyncStorage.getItem(LIVE_TTS_PREFS_STORAGE_KEY);
+      if (!raw) return DEFAULT_TTS_PREFERENCES;
+      const parsed = JSON.parse(raw);
+      const engine: LiveTtsEnginePref =
+        parsed?.ttsEngine === 'phonon_31m' ||
+        parsed?.ttsEngine === 'android_tts' ||
+        parsed?.ttsEngine === 'auto'
+          ? parsed.ttsEngine
+          : 'auto';
+      const voiceId =
+        typeof parsed?.voiceId === 'string' && parsed.voiceId.trim().length > 0
+          ? parsed.voiceId.trim().toLowerCase()
+          : 'easton';
+      return { ttsEngine: engine, voiceId };
+    } catch {
+      return DEFAULT_TTS_PREFERENCES;
+    }
+  }
+
+  public async saveTtsPreferences(prefs: LiveTtsPreferences): Promise<void> {
+    try {
+      await AsyncStorage.setItem(LIVE_TTS_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch (err) {
+      console.warn('[LiveAudioService] Failed to save TTS preferences:', err);
+    }
   }
 
   public async startSession(config: LiveAudioSessionConfig): Promise<LiveAudioStartResult> {
@@ -183,6 +278,26 @@ class LiveAudioServiceImpl {
     if (!this.eventEmitter) return () => {};
     const sub = this.eventEmitter.addListener('onError', (data: any) => {
       callback(data as LiveErrorEvent);
+    });
+    return () => sub.remove();
+  }
+
+  public onTtsDownloadProgress(
+    callback: (event: TtsDownloadProgressEvent) => void
+  ): () => void {
+    if (!this.eventEmitter) return () => {};
+    const sub = this.eventEmitter.addListener('onTtsDownloadProgress', (data: any) => {
+      callback(data as TtsDownloadProgressEvent);
+    });
+    return () => sub.remove();
+  }
+
+  public onTtsConfigChanged(
+    callback: (event: LiveAudioCapabilities) => void
+  ): () => void {
+    if (!this.eventEmitter) return () => {};
+    const sub = this.eventEmitter.addListener('onTtsConfigChanged', (data: any) => {
+      callback(data as LiveAudioCapabilities);
     });
     return () => sub.remove();
   }

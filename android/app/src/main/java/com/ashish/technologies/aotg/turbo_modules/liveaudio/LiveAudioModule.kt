@@ -2,10 +2,12 @@ package com.ashish.technologies.aotg.turbo_modules.liveaudio
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -67,7 +69,10 @@ class LiveAudioModule(
         private const val EVENT_STATE_CHANGE = "onStateChange"
         private const val EVENT_TURN_COMMITTED = "onTurnCommitted"
         private const val EVENT_ROUTE_OR_FOCUS_CHANGE = "onRouteOrFocusChange"
+        private const val EVENT_TTS_DOWNLOAD_PROGRESS = "onTtsDownloadProgress"
+        private const val EVENT_TTS_CONFIG_CHANGED = "onTtsConfigChanged"
         private const val EVENT_ERROR = "onError"
+        private const val ENGINE_ANDROID_TTS = "android_tts"
 
         private const val SPOKEN_STYLE_DIRECTIVE =
             "You are in a live voice conversation. Respond directly in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
@@ -141,8 +146,42 @@ class LiveAudioModule(
         reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     private val vadEngine = SileroVadEngine(reactContext)
-    private val ttsEngine: StreamingTtsEngine = AndroidStreamingTtsEngine(reactContext)
+    private val androidTtsEngine = AndroidStreamingTtsEngine(reactContext)
+    private val phononModelManager = PhononModelManager(reactContext)
+    private val phononTtsEngine = PhononStreamingTtsEngine(phononModelManager)
+    @Volatile private var activeTtsEngine: StreamingTtsEngine = androidTtsEngine
+    @Volatile private var ttsEnginePref: String = "auto"
+    @Volatile private var selectedVoiceId: String = PhononModelManager.DEFAULT_VOICE_ID
+    @Volatile private var memoryPressureDegraded: Boolean = false
     private val asrEngine = OsAsrFallbackEngine(reactContext)
+
+    private val memoryCallbacks = object : ComponentCallbacks2 {
+        @Suppress("DEPRECATION")
+        override fun onTrimMemory(level: Int) {
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+                if (!memoryPressureDegraded) {
+                    Log.w(TAG, "Low memory trim (level=$level) — releasing idle Phonon-31M sessions")
+                    memoryPressureDegraded = true
+                    phononTtsEngine.releaseMemoryIfIdle()
+                    if (activeTtsEngine === phononTtsEngine && !isSessionActive.get()) {
+                        activeTtsEngine = androidTtsEngine
+                    }
+                    emitTtsConfigChangedEvent()
+                }
+            }
+        }
+
+        override fun onConfigurationChanged(newConfig: Configuration) {}
+
+        @Suppress("DEPRECATION")
+        override fun onLowMemory() {
+            onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        }
+    }
+
+    init {
+        reactContext.registerComponentCallbacks(memoryCallbacks)
+    }
 
     private val isSessionActive = AtomicBoolean(false)
     private val isSessionStarting = AtomicBoolean(false)
@@ -275,6 +314,12 @@ class LiveAudioModule(
                     val vadSensitivity = if (config.hasKey("vadSensitivity")) config.getDouble("vadSensitivity").toFloat() else 0.5f
                     val speakerRoute = if (config.hasKey("speakerRoute")) config.getString("speakerRoute") ?: "auto" else "auto"
                     val userSystemPrompt = if (config.hasKey("systemInstruction")) config.getString("systemInstruction")?.trim().orEmpty() else ""
+                    if (config.hasKey("ttsEngine")) {
+                        ttsEnginePref = normalizeTtsPref(config.getString("ttsEngine"))
+                    }
+                    if (config.hasKey("voiceId")) {
+                        selectedVoiceId = PhononModelManager.sanitizeVoiceId(config.getString("voiceId"))
+                    }
 
                     effectiveSystemInstruction = if (userSystemPrompt.isNotEmpty()) {
                         "$SPOKEN_STYLE_DIRECTIVE\n\n$userSystemPrompt"
@@ -325,15 +370,15 @@ class LiveAudioModule(
                     }
                     inputMode = if (useOsAsrFallback) "os_asr" else "audio_bytes"
 
-                    // 2. Initialize Silero VAD v5 (optional asset) and OS TTS engine in parallel with bridge.
+                    // 2. Initialize Silero VAD v5 (optional asset) and selected TTS engine.
                     vadEngine.initialize()
-                    val ttsReady = ttsEngine.initialize()
+                    val ttsReady = prepareActiveTtsEngineForSession()
                     if (startSessionCancelRequested) {
                         promise.reject("ERR_SESSION_CANCELLED", "Live Talk session start was cancelled.")
                         return@withLock
                     }
                     if (!ttsReady) {
-                        promise.reject("ERR_TTS_UNAVAILABLE", "Android TextToSpeech engine could not be initialized.")
+                        promise.reject("ERR_TTS_UNAVAILABLE", "Text-to-Speech engine could not be initialized.")
                         return@withLock
                     }
 
@@ -371,7 +416,8 @@ class LiveAudioModule(
                         putBoolean("success", true)
                         putString("inputMode", inputMode)
                         putString("vadBackend", if (vadEngine.isAvailable) "silero_onnx" else "dsp_fallback")
-                        putString("ttsBackend", ttsEngine.name)
+                        putString("ttsBackend", activeTtsEngine.name)
+                        putString("voiceId", selectedVoiceId)
                         putString("activeRoute", activeOutputRoute)
                         putBoolean("aecEnabled", aecActive)
                         putInt("hwSampleRate", nativeGetHwSampleRate())
@@ -445,22 +491,141 @@ class LiveAudioModule(
     }
 
     override fun getCapabilities(promise: Promise) {
-        val llm = LLMModule.activeInstance
-        val routes = getAvailableRoutesList()
-        val routeArray = Arguments.createArray().apply {
-            routes.forEach { pushString(it) }
+        promise.resolve(buildCapabilitiesMap())
+    }
+
+    override fun downloadPhononModel(variant: String, voiceId: String, promise: Promise) {
+        val cleanVariant = if (variant == PhononModelManager.VARIANT_FP32) {
+            PhononModelManager.VARIANT_FP32
+        } else {
+            PhononModelManager.VARIANT_Q4
         }
-        val map = Arguments.createMap().apply {
-            putBoolean("hasSileroModel", vadEngine.hasBundledOrLocalModel())
-            putBoolean("hasDeviceAsr", asrEngine.isAnyAsrSupported())
-            putBoolean("hasTtsEngine", true)
-            putBoolean("hasAcousticEchoCanceler", AcousticEchoCanceler.isAvailable())
-            putBoolean("hasNoiseSuppressor", NoiseSuppressor.isAvailable())
-            putBoolean("isModelLoaded", llm?.isModelLoadedSync() == true)
-            putBoolean("modelSupportsAudio", llm?.isAudioBackendEnabled() == true)
-            putArray("availableRoutes", routeArray)
+        val cleanVoice = if (voiceId.isNotBlank()) {
+            PhononModelManager.sanitizeVoiceId(voiceId)
+        } else {
+            selectedVoiceId
         }
-        promise.resolve(map)
+        selectedVoiceId = cleanVoice
+        phononTtsEngine.setPreferredVoiceId(cleanVoice)
+
+        moduleScope.launch {
+            try {
+                emitTtsConfigChangedEvent()
+                val ok = phononModelManager.downloadModel(
+                    variant = cleanVariant,
+                    initialVoiceId = cleanVoice,
+                    onProgress = { progress ->
+                        emitTtsDownloadProgressEvent(progress)
+                    },
+                )
+                if (ok) {
+                    memoryPressureDegraded = false
+                    ttsEnginePref = PhononStreamingTtsEngine.ENGINE_NAME
+                    phononTtsEngine.setPreferredVoiceId(cleanVoice)
+                    if (phononTtsEngine.initialize()) {
+                        activeTtsEngine = phononTtsEngine
+                    }
+                }
+                emitTtsConfigChangedEvent()
+                promise.resolve(ok)
+            } catch (t: Throwable) {
+                emitTtsConfigChangedEvent()
+                promise.reject("ERR_PHONON_DOWNLOAD", t.message ?: "Failed to download Phonon-31M.", t)
+            }
+        }
+    }
+
+    override fun cancelPhononDownload(promise: Promise) {
+        phononModelManager.cancelDownload()
+        emitTtsConfigChangedEvent()
+        promise.resolve(true)
+    }
+
+    override fun deletePhononModel(promise: Promise) {
+        moduleScope.launch {
+            try {
+                if (activeTtsEngine === phononTtsEngine) {
+                    phononTtsEngine.stopCurrent()
+                    androidTtsEngine.initialize()
+                    activeTtsEngine = androidTtsEngine
+                }
+                phononTtsEngine.shutdown()
+                val deleted = phononModelManager.deleteModel()
+                if (ttsEnginePref == PhononStreamingTtsEngine.ENGINE_NAME) {
+                    ttsEnginePref = "auto"
+                }
+                memoryPressureDegraded = false
+                emitTtsConfigChangedEvent()
+                emitTtsDownloadProgressEvent(
+                    PhononModelManager.DownloadProgress(
+                        status = "idle",
+                        percent = 0,
+                        downloadedBytes = 0L,
+                        totalBytes = phononModelManager.getExpectedTotalBytes(),
+                    ),
+                )
+                promise.resolve(deleted)
+            } catch (t: Throwable) {
+                promise.reject("ERR_PHONON_DELETE", t.message ?: "Failed to delete Phonon-31M model.", t)
+            }
+        }
+    }
+
+    override fun setTtsConfig(ttsEngine: String, voiceId: String, promise: Promise) {
+        val nextPref = normalizeTtsPref(ttsEngine)
+        val nextVoice = if (voiceId.isNotBlank()) {
+            PhononModelManager.sanitizeVoiceId(voiceId)
+        } else {
+            selectedVoiceId
+        }
+        ttsEnginePref = nextPref
+        selectedVoiceId = nextVoice
+        phononTtsEngine.setPreferredVoiceId(nextVoice)
+        if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME) {
+            memoryPressureDegraded = false
+        }
+
+        moduleScope.launch {
+            try {
+                if (nextPref == ENGINE_ANDROID_TTS || nextPref == androidTtsEngine.name) {
+                    phononTtsEngine.stopCurrent()
+                    androidTtsEngine.initialize()
+                    activeTtsEngine = androidTtsEngine
+                } else if (phononModelManager.isCoreInstalled() && !memoryPressureDegraded) {
+                    val voiceReady = phononModelManager.isVoiceDownloaded(nextVoice) ||
+                        phononModelManager.ensureVoiceDownloaded(nextVoice)
+                    if (voiceReady) {
+                        val phononReady = if (phononTtsEngine.isInitialized()) {
+                            phononTtsEngine.switchVoice(nextVoice)
+                        } else {
+                            phononTtsEngine.initialize()
+                        }
+                        if (phononReady) {
+                            activeTtsEngine = phononTtsEngine
+                        } else {
+                            androidTtsEngine.initialize()
+                            activeTtsEngine = androidTtsEngine
+                            emitErrorEvent(
+                                "WARN_PHONON_FALLBACK",
+                                phononTtsEngine.getLastError() ?: "Phonon-31M unavailable; using device TTS fallback.",
+                                true,
+                            )
+                        }
+                    } else if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME) {
+                        emitErrorEvent(
+                            "WARN_PHONON_VOICE",
+                            "Could not download voice '$nextVoice'.",
+                            true,
+                        )
+                    }
+                }
+                val snapshot = buildCapabilitiesMap()
+                emitTtsConfigChangedEvent()
+                promise.resolve(snapshot)
+            } catch (t: Throwable) {
+                promise.reject("ERR_TTS_CONFIG", t.message ?: "Failed to apply TTS configuration.", t)
+            }
+        }
     }
 
     override fun addListener(eventName: String) {
@@ -474,10 +639,14 @@ class LiveAudioModule(
     override fun invalidate() {
         startSessionCancelRequested = true
         try {
+            reactContext.unregisterComponentCallbacks(memoryCallbacks)
+        } catch (_: Throwable) {}
+        try {
             cleanupSessionBlocking()
         } catch (_: Throwable) {}
         vadEngine.close()
-        ttsEngine.shutdown()
+        phononTtsEngine.shutdown()
+        androidTtsEngine.shutdown()
         asrEngine.shutdown()
         moduleScope.cancel()
         super.invalidate()
@@ -555,7 +724,7 @@ class LiveAudioModule(
         currentTurnFullSanitized = ""
 
         activeTurnEpoch.set(newEpoch)
-        ttsEngine.stopCurrent()
+        stopAllTtsEngines()
         asrEngine.cancelCurrent()
         if (useOsAsrFallback) {
             asrEngine.beginUtterance(newEpoch)
@@ -806,39 +975,7 @@ class LiveAudioModule(
                 }
 
                 try {
-                    ttsEngine.synthesizeClauseBlocking(
-                        clauseText = clause.text,
-                        turnEpoch = clause.turnEpoch,
-                        clauseId = clause.clauseId,
-                        onPcmChunk = { pcmBytes, sr, channels ->
-                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                                false
-                            } else {
-                                nativeEnqueuePcmChunk(
-                                    pcmBytes,
-                                    sr,
-                                    channels,
-                                    clause.turnEpoch,
-                                    clause.clauseId,
-                                    clause.charStartOffset,
-                                    clause.charEndOffset
-                                )
-                            }
-                        },
-                        onFallbackWav = { wavBytes ->
-                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                                false
-                            } else {
-                                nativeEnqueueWavClause(
-                                    wavBytes,
-                                    clause.turnEpoch,
-                                    clause.clauseId,
-                                    clause.charStartOffset,
-                                    clause.charEndOffset
-                                )
-                            }
-                        }
-                    )
+                    synthesizeClauseWithFallback(clause)
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
                     Log.e(TAG, "TTS worker synthesis error: ${t.message}", t)
@@ -898,7 +1035,7 @@ class LiveAudioModule(
         val newEpoch = nativeGetTurnEpoch()
         activeTurnEpoch.set(newEpoch)
 
-        ttsEngine.stopCurrent()
+        stopAllTtsEngines()
         asrEngine.cancelCurrent()
         LLMModule.activeInstance?.cancelLiveGenerationNow()
         activeLlmJob = null
@@ -1254,7 +1391,7 @@ class LiveAudioModule(
         activeTurnId = ""
         currentTurnUserText = ""
         currentTurnFullSanitized = ""
-        ttsEngine.stopCurrent()
+        stopAllTtsEngines()
         asrEngine.cancelCurrent()
         LLMModule.activeInstance?.cancelLiveGenerationNow()
         activeLlmJob = null
@@ -1299,7 +1436,7 @@ class LiveAudioModule(
         isSessionStarting.set(false)
         isLiveSessionRunning = false
         activeTurnEpoch.incrementAndGet()
-        ttsEngine.stopCurrent()
+        stopAllTtsEngines()
         asrEngine.cancelCurrent()
         LLMModule.activeInstance?.cancelLiveGenerationNow()
         activeLlmJob = null
@@ -1316,6 +1453,204 @@ class LiveAudioModule(
         }
         teardownAudioSession()
         transitionJsState("IDLE")
+    }
+
+    private fun normalizeTtsPref(raw: String?): String {
+        return when (raw?.trim()?.lowercase()) {
+            PhononStreamingTtsEngine.ENGINE_NAME -> PhononStreamingTtsEngine.ENGINE_NAME
+            ENGINE_ANDROID_TTS, "device", "system" -> ENGINE_ANDROID_TTS
+            else -> "auto"
+        }
+    }
+
+    private suspend fun prepareActiveTtsEngineForSession(): Boolean {
+        val wantsPhonon = when (ttsEnginePref) {
+            ENGINE_ANDROID_TTS, androidTtsEngine.name -> false
+            PhononStreamingTtsEngine.ENGINE_NAME -> !memoryPressureDegraded && phononModelManager.isCoreInstalled()
+            else -> !memoryPressureDegraded && phononModelManager.isCoreInstalled()
+        }
+
+        if (wantsPhonon) {
+            phononTtsEngine.setPreferredVoiceId(selectedVoiceId)
+            val phononOk = phononTtsEngine.initialize()
+            if (phononOk) {
+                selectedVoiceId = phononTtsEngine.getSelectedVoiceId()
+                activeTtsEngine = phononTtsEngine
+                return true
+            }
+            emitErrorEvent(
+                "WARN_PHONON_FALLBACK",
+                phononTtsEngine.getLastError() ?: "Phonon-31M could not load; using device TTS fallback.",
+                true,
+            )
+        }
+
+        val androidOk = androidTtsEngine.initialize()
+        if (androidOk) {
+            activeTtsEngine = androidTtsEngine
+        }
+        return androidOk
+    }
+
+    private fun stopAllTtsEngines() {
+        phononTtsEngine.stopCurrent()
+        androidTtsEngine.stopCurrent()
+    }
+
+    private suspend fun synthesizeClauseWithFallback(clause: QueuedClause) {
+        val engine = activeTtsEngine
+        val emittedAnyPcm = AtomicBoolean(false)
+        val ok = engine.synthesizeClauseBlocking(
+            clauseText = clause.text,
+            turnEpoch = clause.turnEpoch,
+            clauseId = clause.clauseId,
+            onPcmChunk = { pcmBytes, sr, channels ->
+                emittedAnyPcm.set(true)
+                if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                    false
+                } else {
+                    nativeEnqueuePcmChunk(
+                        pcmBytes,
+                        sr,
+                        channels,
+                        clause.turnEpoch,
+                        clause.clauseId,
+                        clause.charStartOffset,
+                        clause.charEndOffset,
+                    )
+                }
+            },
+            onFallbackWav = { wavBytes ->
+                emittedAnyPcm.set(true)
+                if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                    false
+                } else {
+                    nativeEnqueueWavClause(
+                        wavBytes,
+                        clause.turnEpoch,
+                        clause.clauseId,
+                        clause.charStartOffset,
+                        clause.charEndOffset,
+                    )
+                }
+            },
+        )
+
+        if (
+            !ok &&
+            engine === phononTtsEngine &&
+            isSessionActive.get() &&
+            clause.turnEpoch == activeTurnEpoch.get()
+        ) {
+            Log.w(TAG, "Phonon-31M clause synthesis failed mid-turn; falling back to device TTS.")
+            val androidReady = androidTtsEngine.initialize()
+            if (androidReady) {
+                activeTtsEngine = androidTtsEngine
+                emitTtsConfigChangedEvent()
+                emitErrorEvent(
+                    "WARN_PHONON_FALLBACK",
+                    phononTtsEngine.getLastError() ?: "Switched to device TTS fallback.",
+                    true,
+                )
+                if (!emittedAnyPcm.get()) {
+                    androidTtsEngine.synthesizeClauseBlocking(
+                        clauseText = clause.text,
+                        turnEpoch = clause.turnEpoch,
+                        clauseId = clause.clauseId,
+                        onPcmChunk = { pcmBytes, sr, channels ->
+                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                                false
+                            } else {
+                                nativeEnqueuePcmChunk(
+                                    pcmBytes,
+                                    sr,
+                                    channels,
+                                    clause.turnEpoch,
+                                    clause.clauseId,
+                                    clause.charStartOffset,
+                                    clause.charEndOffset,
+                                )
+                            }
+                        },
+                        onFallbackWav = { wavBytes ->
+                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                                false
+                            } else {
+                                nativeEnqueueWavClause(
+                                    wavBytes,
+                                    clause.turnEpoch,
+                                    clause.clauseId,
+                                    clause.charStartOffset,
+                                    clause.charEndOffset,
+                                )
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildCapabilitiesMap(): WritableMap {
+        val llm = LLMModule.activeInstance
+        val routes = getAvailableRoutesList()
+        val routeArray = Arguments.createArray().apply {
+            routes.forEach { pushString(it) }
+        }
+        val snapshot = phononModelManager.getStatusSnapshot()
+        val downloadedVoicesArray = Arguments.createArray().apply {
+            snapshot.downloadedVoices.forEach { pushString(it) }
+        }
+        val availableVoicesArray = Arguments.createArray().apply {
+            PhononModelManager.CURATED_VOICES.forEach { v ->
+                pushMap(
+                    Arguments.createMap().apply {
+                        putString("id", v.id)
+                        putString("label", v.label)
+                        putString("description", v.description)
+                        putBoolean("downloaded", snapshot.downloadedVoices.contains(v.id))
+                    },
+                )
+            }
+        }
+        return Arguments.createMap().apply {
+            putBoolean("hasSileroModel", vadEngine.hasBundledOrLocalModel())
+            putBoolean("hasDeviceAsr", asrEngine.isAnyAsrSupported())
+            putBoolean("hasTtsEngine", true)
+            putBoolean("hasAcousticEchoCanceler", AcousticEchoCanceler.isAvailable())
+            putBoolean("hasNoiseSuppressor", NoiseSuppressor.isAvailable())
+            putBoolean("isModelLoaded", llm?.isModelLoadedSync() == true)
+            putBoolean("modelSupportsAudio", llm?.isAudioBackendEnabled() == true)
+            putArray("availableRoutes", routeArray)
+            putBoolean("phononInstalled", snapshot.isInstalled)
+            putBoolean("phononDownloading", phononModelManager.isDownloading())
+            putDouble("phononExpectedBytes", snapshot.expectedTotalBytes.toDouble())
+            putDouble("phononDiskBytes", snapshot.downloadedBytes.toDouble())
+            putString("phononVariant", snapshot.installedVariant ?: "")
+            putString("selectedTtsEngine", ttsEnginePref)
+            putString("selectedVoiceId", selectedVoiceId)
+            putArray("downloadedVoices", downloadedVoicesArray)
+            putArray("availableVoices", availableVoicesArray)
+        }
+    }
+
+    private fun emitTtsDownloadProgressEvent(progress: PhononModelManager.DownloadProgress) {
+        sendEvent(EVENT_TTS_DOWNLOAD_PROGRESS, Arguments.createMap().apply {
+            putString("status", progress.status)
+            putInt("percent", progress.percent)
+            putDouble("downloadedBytes", progress.downloadedBytes.toDouble())
+            putDouble("totalBytes", progress.totalBytes.toDouble())
+            if (progress.currentFile != null) {
+                putString("currentFile", progress.currentFile)
+            }
+            if (progress.error != null) {
+                putString("error", progress.error)
+            }
+        })
+    }
+
+    private fun emitTtsConfigChangedEvent() {
+        sendEvent(EVENT_TTS_CONFIG_CHANGED, buildCapabilitiesMap())
     }
 
     // -------------------------------------------------------------------------
