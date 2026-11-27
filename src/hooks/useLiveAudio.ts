@@ -15,6 +15,7 @@ import {
   applyTtsCapabilities,
   closeLiveTalkModal,
   commitLiveTurn,
+  LiveLanguage,
   LiveOutputRoute,
   LiveTalkState,
   LiveTtsBackend,
@@ -23,6 +24,7 @@ import {
   openLiveTalkModal,
   seedModalTurns,
   sessionStarted,
+  setLiveLanguage,
   setLiveTalkError,
   setMicMuted,
   setPhononDownloadProgress,
@@ -101,6 +103,8 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
   ttsEnginePrefRef.current = liveTalk.ttsEnginePref;
   const selectedVoiceIdRef = useRef<string>(liveTalk.selectedVoiceId);
   selectedVoiceIdRef.current = liveTalk.selectedVoiceId;
+  const languagePrefRef = useRef<LiveLanguage>(liveTalk.language);
+  languagePrefRef.current = liveTalk.language;
   const prefsHydrationPromiseRef = useRef<Promise<{ ttsEngine: LiveTtsEnginePref; voiceId: string }> | null>(null);
 
   const cleanupListeners = useCallback(() => {
@@ -136,6 +140,10 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
   }, [cleanupListeners, dispatch, micLevelSV, speakerLevelSV]);
 
   useEffect(() => {
+    liveAudioService.loadLanguagePreference().then((lang) => {
+      languagePrefRef.current = lang;
+      dispatch(setLiveLanguage(lang));
+    });
     const p = liveAudioService.loadTtsPreferences().then((prefs) => {
       ttsEnginePrefRef.current = prefs.ttsEngine;
       selectedVoiceIdRef.current = prefs.voiceId;
@@ -438,6 +446,7 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
         disableVision: true,
         ttsEngine: prefs.ttsEngine,
         voiceId: prefs.voiceId,
+        language: languagePrefRef.current,
       });
 
       if (sessionAttemptIdRef.current !== attemptId) {
@@ -716,6 +725,20 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
     [dispatch]
   );
 
+  const selectLanguage = useCallback(
+    async (language: LiveLanguage) => {
+      languagePrefRef.current = language;
+      dispatch(setLiveLanguage(language));
+      await liveAudioService.saveLanguagePreference(language);
+      try {
+        await liveAudioService.setLanguage(language);
+      } catch (err) {
+        console.warn('[useLiveAudio] selectLanguage error:', err);
+      }
+    },
+    [dispatch]
+  );
+
   return {
     liveTalk,
     selectedModel,
@@ -735,6 +758,7 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
     deletePhononModel,
     selectTtsEngine,
     selectVoice,
+    selectLanguage,
     micPermissionModal: {
       visible: micPermissionState.visible,
       isPermanentlyDenied: micPermissionState.isPermanentlyDenied,

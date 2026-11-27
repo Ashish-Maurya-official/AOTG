@@ -19,6 +19,7 @@ export interface LiveAudioSessionConfig {
   disableVision: boolean;
   ttsEngine?: string;
   voiceId?: string;
+  language?: string;
 }
 
 export interface LiveAudioStartResult {
@@ -71,6 +72,7 @@ export interface Spec extends TurboModule {
   cancelPhononDownload(): Promise<boolean>;
   deletePhononModel(): Promise<boolean>;
   setTtsConfig(ttsEngine: string, voiceId: string): Promise<LiveAudioCapabilities>;
+  setLanguage(language: string): Promise<string>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }

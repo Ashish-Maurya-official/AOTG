@@ -33,6 +33,13 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
         private const val TAG = "AndroidStreamingTts"
         private const val INIT_TIMEOUT_SEC = 5L
         private const val CLAUSE_TIMEOUT_SEC = 20L
+
+        fun containsDevanagari(text: String): Boolean {
+            for (ch in text) {
+                if (ch in '\u0900'..'\u097F') return true
+            }
+            return false
+        }
     }
 
     override val name: String = "android_tts"
@@ -52,10 +59,81 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
 
     @Volatile private var tts: TextToSpeech? = null
     @Volatile private var isReady: Boolean = false
+    @Volatile private var preferredLanguage: String = "auto"
+    @Volatile private var activeLanguageTag: String = ""
+    @Volatile private var missingHindiWarned: Boolean = false
+    @Volatile var onLanguageWarning: ((String) -> Unit)? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val seqCounter = AtomicInteger(0)
     private val activeUtterances = ConcurrentHashMap<String, ActiveUtterance>()
     @Volatile private var currentUtterance: ActiveUtterance? = null
+
+    fun setPreferredLanguage(language: String) {
+        preferredLanguage = when (language) {
+            "hi", "en" -> language
+            else -> "auto"
+        }
+        missingHindiWarned = false
+    }
+
+    private fun resolveLocaleForClause(text: String): Locale {
+        if (containsDevanagari(text) || preferredLanguage == "hi") {
+            return Locale.forLanguageTag("hi-IN")
+        }
+        if (preferredLanguage == "en") {
+            val def = Locale.getDefault()
+            return if (def.language == "en") def else Locale.US
+        }
+        return Locale.getDefault()
+    }
+
+    private fun applyLocaleForClause(engine: TextToSpeech, text: String) {
+        val target = resolveLocaleForClause(text)
+        val targetTag = target.toLanguageTag()
+        if (targetTag == activeLanguageTag) return
+
+        val res = try {
+            engine.setLanguage(target)
+        } catch (_: Throwable) {
+            TextToSpeech.LANG_NOT_SUPPORTED
+        }
+        if (res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED) {
+            activeLanguageTag = targetTag
+            return
+        }
+
+        if (target.language == "hi") {
+            val baseHi = Locale.forLanguageTag("hi")
+            val hiRes = try {
+                engine.setLanguage(baseHi)
+            } catch (_: Throwable) {
+                TextToSpeech.LANG_NOT_SUPPORTED
+            }
+            if (hiRes != TextToSpeech.LANG_MISSING_DATA && hiRes != TextToSpeech.LANG_NOT_SUPPORTED) {
+                activeLanguageTag = targetTag
+                return
+            }
+            if (!missingHindiWarned) {
+                missingHindiWarned = true
+                onLanguageWarning?.invoke(
+                    "Hindi TTS voice data is not installed in Android Text-to-Speech settings."
+                )
+            }
+        }
+
+        val fallback = if (Locale.getDefault().language == "hi") Locale.US else Locale.getDefault()
+        try {
+            val fbRes = engine.setLanguage(fallback)
+            if (fbRes != TextToSpeech.LANG_MISSING_DATA && fbRes != TextToSpeech.LANG_NOT_SUPPORTED) {
+                activeLanguageTag = fallback.toLanguageTag()
+                return
+            }
+        } catch (_: Throwable) {}
+        try {
+            engine.setLanguage(Locale.US)
+            activeLanguageTag = Locale.US.toLanguageTag()
+        } catch (_: Throwable) {}
+    }
 
     private fun getTtsCacheDir(): File {
         val dir = File(context.cacheDir, "live_tts_tmp")
@@ -75,12 +153,7 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
                 instance = TextToSpeech(context.applicationContext) { status ->
                     if (status == TextToSpeech.SUCCESS) {
                         try {
-                            val localeRes = instance?.setLanguage(Locale.getDefault())
-                            if (localeRes == TextToSpeech.LANG_MISSING_DATA ||
-                                localeRes == TextToSpeech.LANG_NOT_SUPPORTED
-                            ) {
-                                instance?.setLanguage(Locale.US)
-                            }
+                            instance?.let { applyLocaleForClause(it, "") }
                             instance?.setSpeechRate(1.03f)
                             instance?.setPitch(1.0f)
                             initResult.complete(true)
@@ -208,6 +281,7 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
         currentUtterance = utt
 
         return try {
+            applyLocaleForClause(engine, cleanText)
             val params = Bundle()
             val status = engine.synthesizeToFile(cleanText, params, tempFile, uttId)
             if (status != TextToSpeech.SUCCESS) {
@@ -249,6 +323,7 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
     override fun shutdown() {
         stopCurrent()
         isReady = false
+        activeLanguageTag = ""
         try {
             tts?.shutdown()
         } catch (_: Throwable) {}

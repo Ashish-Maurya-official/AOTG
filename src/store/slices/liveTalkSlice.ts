@@ -12,6 +12,7 @@ export type LiveVadBackend = 'silero_onnx' | 'dsp_fallback';
 export type LiveOutputRoute = 'auto' | 'speaker' | 'earpiece' | 'bluetooth' | 'wired';
 export type LiveTtsEnginePref = 'auto' | 'phonon_31m' | 'android_tts';
 export type LiveTtsBackend = 'phonon_31m' | 'android_tts';
+export type LiveLanguage = 'auto' | 'en' | 'hi';
 export type PhononDownloadStatus = 'idle' | 'downloading' | 'ready' | 'cancelled' | 'error';
 
 export interface PhononVoiceOption {
@@ -65,6 +66,7 @@ export interface LiveTalkSliceState {
   assistantTranscript: string;
   turns: LiveCaptionTurn[];
   error: string | null;
+  language: LiveLanguage;
   ttsEnginePref: LiveTtsEnginePref;
   ttsBackend: LiveTtsBackend;
   selectedVoiceId: string;
@@ -96,6 +98,7 @@ const initialState: LiveTalkSliceState = {
   assistantTranscript: '',
   turns: [],
   error: null,
+  language: 'auto',
   ttsEnginePref: 'auto',
   ttsBackend: 'android_tts',
   selectedVoiceId: 'easton',
@@ -254,6 +257,9 @@ const liveTalkSlice = createSlice({
       state.error = action.payload;
       state.isStarting = false;
     },
+    setLiveLanguage(state, action: PayloadAction<LiveLanguage>) {
+      state.language = action.payload;
+    },
     setTtsPreference(
       state,
       action: PayloadAction<{
@@ -367,6 +373,7 @@ export const {
   commitLiveTurn,
   seedModalTurns,
   setLiveTalkError,
+  setLiveLanguage,
   setTtsPreference,
   applyTtsCapabilities,
   setPhononDownloadProgress,

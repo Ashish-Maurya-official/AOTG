@@ -393,8 +393,14 @@ void SanitizerAndChunker::tryEmitClauses(std::vector<EmittedClause>& out) {
 
             const bool followedBySpace = (i + 1 < pendingClause_.size()) &&
                                          std::isspace(static_cast<unsigned char>(pendingClause_[i + 1]));
+            const bool isDevanagariDandaEnd =
+                i >= 2 &&
+                static_cast<unsigned char>(pendingClause_[i - 2]) == 0xE0 &&
+                static_cast<unsigned char>(pendingClause_[i - 1]) == 0xA5 &&
+                (static_cast<unsigned char>(c) == 0xA4 || static_cast<unsigned char>(c) == 0xA5);
 
-            if (isStrongEndPunct(c) && followedBySpace && words >= strongMin) {
+            if ((isStrongEndPunct(c) && followedBySpace && words >= strongMin) ||
+                (isDevanagariDandaEnd && (followedBySpace || i + 1 < pendingClause_.size()) && words >= strongMin)) {
                 splitPos = i + 1;
                 break;
             }

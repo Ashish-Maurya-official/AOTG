@@ -33,6 +33,7 @@ import reducer, {
   seedModalTurns,
   sessionStarted,
   setLiveTalkError,
+  setLiveLanguage,
   setMicMuted,
   setPhononDownloadProgress,
   setPreferredRoute,
@@ -231,5 +232,16 @@ describe('liveTalkSlice', () => {
     state = reducer(state, closeLiveTalkModal());
     expect(state.phononInstalled).toBe(true);
     expect(state.selectedVoiceId).toBe('harper');
+  });
+
+  it('switches conversation language cleanly between auto, en, and hi', () => {
+    let state = reducer(undefined, openLiveTalkModal());
+    expect(state.language).toBe('auto');
+
+    state = reducer(state, setLiveLanguage('hi'));
+    expect(state.language).toBe('hi');
+
+    state = reducer(state, setLiveLanguage('en'));
+    expect(state.language).toBe('en');
   });
 });

@@ -696,6 +696,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
         deletePhononModel,
         selectTtsEngine,
         selectVoice,
+        selectLanguage,
         micPermissionModal,
     } = useLiveAudio({
         activeSessionIdRef,
@@ -1652,6 +1653,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                     onDeletePhonon={deletePhononModel}
                     onSelectTtsEngine={selectTtsEngine}
                     onSelectVoice={selectVoice}
+                    onSelectLanguage={selectLanguage}
                 />
 
                 {/* Microphone Permission Prompt */}

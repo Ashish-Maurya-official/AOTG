@@ -58,6 +58,7 @@ jest.mock('../../native/turbo_modules/LiveAudio/NativeLiveAudio', () => ({
     downloadPhononModel: jest.fn().mockResolvedValue(true),
     cancelPhononDownload: jest.fn().mockResolvedValue(true),
     deletePhononModel: jest.fn().mockResolvedValue(true),
+    setLanguage: jest.fn().mockImplementation(async (lang: string) => lang),
     setTtsConfig: jest.fn().mockResolvedValue({
       hasSileroModel: false,
       hasDeviceAsr: true,
@@ -332,5 +333,13 @@ describe('Phase 1 Live Talk & LLM Service Contracts', () => {
     const unsubConfig = liveAudioService.onTtsConfigChanged(() => {});
     expect(() => unsubProgress()).not.toThrow();
     expect(() => unsubConfig()).not.toThrow();
+  });
+
+  it('persists conversation language preferences and forwards setLanguage to native', async () => {
+    await expect(liveAudioService.loadLanguagePreference()).resolves.toBe('auto');
+    await liveAudioService.saveLanguagePreference('hi');
+    await expect(liveAudioService.loadLanguagePreference()).resolves.toBe('hi');
+    await expect(liveAudioService.setLanguage('hi')).resolves.toBe('hi');
+    expect(NativeLiveAudio?.setLanguage).toHaveBeenCalledWith('hi');
   });
 });

@@ -124,6 +124,7 @@ private:
     double outFracPhase_ = 0.0;
     float outHist_[4]{0.0f, 0.0f, 0.0f, 0.0f};
     bool outHistInitialized_ = false;
+    float outSpeakerEnv_ = 0.0f;
     PlaybackSegment activeSeg_{};
     bool hasActiveSeg_ = false;
     uint64_t totalPlayed24kSamples_ = 0;
@@ -154,6 +155,7 @@ private:
     std::atomic<float> vadSensitivity_{0.5f};
     std::atomic<float> currentMicRms_{0.0f};
     std::atomic<float> currentSpeakerRms_{0.0f};
+    std::atomic<float> speakerEchoRms_{0.0f};
     std::atomic<int64_t> speakingStartedMs_{0};
     std::atomic<uint64_t> epochPlaybackStartSample_{0};
 

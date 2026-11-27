@@ -29,8 +29,11 @@ constexpr size_t kVadFrameSamples = 512;      // 32ms @ 16kHz
 constexpr size_t kVadContextSamples = 64;     // Silero VAD v5 rolling context
 constexpr size_t kVadTotalSamples = kVadContextSamples + kVadFrameSamples; // 576
 constexpr size_t kPreRollSamples = 6400;      // 400ms @ 16kHz
-constexpr size_t kBargeInPreRollCap = 2048;   // 128ms cap during SPEAKING
-constexpr size_t kMaxUtteranceSamples = 16000 * 30;
+constexpr size_t kSpeechOnsetFrames = 3;      // 96ms onset confirmation
+constexpr size_t kMinUtteranceVoicedFrames = 4; // >= 128ms total active voice
+constexpr size_t kMinBargeInFrames = 5;       // minimum ~160ms voice floor even on loud barge-in
+constexpr int64_t kMinPlaybackSettleMs = 120; // speaker DAC-to-mic initial propagation settle
+constexpr size_t kMaxWavSafetySamples = 16000 * 600; // 10-min WAV buffer OOM guard only
 constexpr float kPi = 3.14159265358979323846f;
 
 int64_t steadyNowMs() {
@@ -52,29 +55,51 @@ inline float cubicCatmullRom(float y0, float y1, float y2, float y3, float t) {
 }
 
 /**
- * Built-in calibrated energy + zero-crossing fallback used ONLY if silero_vad.onnx
- * could not be loaded cleanly. Returns calibrated pseudo-probability in [0, 1].
+ * Built-in DC-free energy + voice-band ZCR/spectral-slope fallback used ONLY if
+ * silero_vad.onnx could not be loaded cleanly. Returns pseudo-probability in [0, 1].
  */
 float fallbackDspVad(const int16_t* pcm512, size_t count, float noiseFloorRms) {
     if (!pcm512 || count == 0) return 0.0f;
-    double sumSq = 0.0;
-    size_t zeroCrossings = 0;
-    int16_t prev = pcm512[0];
+    double sum = 0.0;
     for (size_t i = 0; i < count; ++i) {
-        const float s = static_cast<float>(pcm512[i]) / 32768.0f;
+        sum += static_cast<double>(pcm512[i]) / 32768.0;
+    }
+    const float mean = static_cast<float>(sum / static_cast<double>(count));
+
+    double sumSq = 0.0;
+    double diffSumSq = 0.0;
+    size_t zeroCrossings = 0;
+    float prev = (static_cast<float>(pcm512[0]) / 32768.0f) - mean;
+    for (size_t i = 0; i < count; ++i) {
+        const float s = (static_cast<float>(pcm512[i]) / 32768.0f) - mean;
         sumSq += static_cast<double>(s) * static_cast<double>(s);
-        if ((pcm512[i] >= 0 && prev < 0) || (pcm512[i] < 0 && prev >= 0)) {
-            ++zeroCrossings;
+        if (i > 0) {
+            const float d = s - prev;
+            diffSumSq += static_cast<double>(d) * static_cast<double>(d);
+            if ((s >= 0.0f && prev < 0.0f) || (s < 0.0f && prev >= 0.0f)) {
+                ++zeroCrossings;
+            }
         }
-        prev = pcm512[i];
+        prev = s;
     }
     const float rms = static_cast<float>(std::sqrt(sumSq / static_cast<double>(count)));
+    const float diffRms = static_cast<float>(std::sqrt(diffSumSq / static_cast<double>(std::max<size_t>(1, count - 1))));
     const float zcr = static_cast<float>(zeroCrossings) / static_cast<float>(count);
-    const float floor = std::max(0.008f, noiseFloorRms * 2.2f);
-    const float snrScore = clampFloat((rms - floor) / std::max(0.015f, floor * 2.5f), 0.0f, 1.0f);
-    // Reject pure ultra-high-frequency hiss if ZCR > 0.45 with low SNR
-    const float zcrGate = (zcr > 0.45f) ? 0.65f : 1.0f;
-    return clampFloat(snrScore * zcrGate, 0.0f, 1.0f);
+    const float diffRatio = (rms > 1e-5f) ? (diffRms / rms) : 0.0f;
+
+    const float floor = std::max(0.010f, noiseFloorRms * 2.3f);
+    const float snrScore = clampFloat((rms - floor) / std::max(0.018f, floor * 2.4f), 0.0f, 1.0f);
+
+    // Reject sub-bass handling thumps (very low ZCR/diffRatio) and broadband static/fan hiss.
+    float bandGate = 1.0f;
+    if (zcr < 0.012f || diffRatio < 0.08f) {
+        bandGate = 0.25f;
+    } else if (zcr > 0.44f || diffRatio > 1.35f) {
+        bandGate = 0.30f;
+    } else if (zcr > 0.34f || diffRatio > 1.10f) {
+        bandGate = 0.62f;
+    }
+    return clampFloat(snrScore * bandGate, 0.0f, 1.0f);
 }
 
 } // namespace
@@ -140,6 +165,7 @@ bool OboeAudioEngine::start(bool useOsAsrFallback, float vadSensitivity, EngineC
     committedCharEnd_.store(0, std::memory_order_release);
     currentMicRms_.store(0.0f, std::memory_order_release);
     currentSpeakerRms_.store(0.0f, std::memory_order_release);
+    speakerEchoRms_.store(0.0f, std::memory_order_release);
     currentTurnEpoch_.store(1, std::memory_order_release);
     fadeAndFlushEpoch_.store(0, std::memory_order_release);
     lastStartedWriteEpoch_.store(0, std::memory_order_release);
@@ -152,6 +178,7 @@ bool OboeAudioEngine::start(bool useOsAsrFallback, float vadSensitivity, EngineC
     outFracPhase_ = 0.0;
     std::memset(outHist_, 0, sizeof(outHist_));
     outHistInitialized_ = false;
+    outSpeakerEnv_ = 0.0f;
     hasActiveSeg_ = false;
     totalPlayed24kSamples_ = 0;
     fadeOutRemainingSamples_ = 0;
@@ -671,6 +698,12 @@ oboe::DataCallbackResult OboeAudioEngine::onOutputReady(void* audioData, int32_t
 
     const float rms = static_cast<float>(std::sqrt(sumSq / static_cast<double>(numFrames)));
     currentSpeakerRms_.store(rms, std::memory_order_relaxed);
+    const float decayStep = clampFloat(
+        1.0f - static_cast<float>(numFrames) / (static_cast<float>(outRate) * 0.22f),
+        0.5f,
+        0.999f);
+    outSpeakerEnv_ = std::max(rms, outSpeakerEnv_ * decayStep);
+    speakerEchoRms_.store(outSpeakerEnv_, std::memory_order_relaxed);
 
     // Check if turn audio drained cleanly after TTS synthesis completed
     if (!hadAudio &&
@@ -702,17 +735,38 @@ void OboeAudioEngine::vadLoop() {
     bool inSpeech = false;
     size_t onsetFrames = 0;
     size_t voicedFrames = 0;
-    size_t hangoverFrames = 0;
-    size_t bargeInHoldFrames = 0;
+    size_t currentGapFrames = 0;
+    size_t maxIntraGapFrames = 0;
+    size_t bargeInSpeechFrames = 0;
+    float silenceCredits = 0.0f;
+    float bargeInEvidence = 0.0f;
+    float recentPeakSpeechRms = 0.0f;
     float noiseFloorRms = 0.008f;
+    float echoReferenceRms = 0.0f;
+    float echoCouplingGain = 0.65f;
     float smoothedMicLevel = 0.0f;
     float smoothedSpeakerLevel = 0.0f;
     int64_t lastLevelEmitMs = 0;
     int32_t prevObservedEpoch = currentTurnEpoch_.load(std::memory_order_acquire);
+    EngineState prevLoopState = EngineState::Idle;
+
+    auto resetSpeechState = [&]() {
+        inSpeech = false;
+        onsetFrames = 0;
+        voicedFrames = 0;
+        currentGapFrames = 0;
+        maxIntraGapFrames = 0;
+        silenceCredits = 0.0f;
+        recentPeakSpeechRms = 0.0f;
+        preRoll.reset();
+        utterancePcm.clear();
+    };
 
     while (running_.load(std::memory_order_acquire)) {
         if (reopenRequested_.exchange(false, std::memory_order_acq_rel)) {
             reopenStreams();
+            echoCouplingGain = 0.65f;
+            echoReferenceRms = 0.0f;
         }
 
         // Check if playback finished naturally while in Speaking state (never called on audio thread).
@@ -732,21 +786,12 @@ void OboeAudioEngine::vadLoop() {
                 inSpeech && state() == EngineState::Listening) {
                 if (utterancePcm.size() >= 1600) {
                     const auto wav = buildWavBytes(utterancePcm.data(), utterancePcm.size(), kCaptureTargetRate, 1);
-                    inSpeech = false;
-                    onsetFrames = 0;
-                    voicedFrames = 0;
-                    hangoverFrames = 0;
-                    preRoll.reset();
-                    utterancePcm.clear();
-                    if (callbacks_.onVadSpeechState) callbacks_.onVadSpeechState(false);
+                    resetSpeechState();
                     transitionState(EngineState::Thinking);
+                    if (callbacks_.onVadSpeechState) callbacks_.onVadSpeechState(false);
                     if (callbacks_.onSpeechTurnReady) callbacks_.onSpeechTurnReady(wav);
                 } else {
-                    inSpeech = false;
-                    onsetFrames = 0;
-                    voicedFrames = 0;
-                    hangoverFrames = 0;
-                    utterancePcm.clear();
+                    resetSpeechState();
                     if (callbacks_.onVadSpeechState) callbacks_.onVadSpeechState(false);
                 }
                 continue;
@@ -763,14 +808,15 @@ void OboeAudioEngine::vadLoop() {
 
         // Handle muted state cleanly
         if (micMuted_.load(std::memory_order_acquire)) {
-            inSpeech = false;
-            onsetFrames = 0;
-            voicedFrames = 0;
-            hangoverFrames = 0;
-            bargeInHoldFrames = 0;
-            preRoll.reset();
-            utterancePcm.clear();
+            resetSpeechState();
+            bargeInSpeechFrames = 0;
+            bargeInEvidence = 0.0f;
             context64.fill(0.0f);
+            prevLoopState = state();
+            const float curEcho = std::max(
+                currentSpeakerRms_.load(std::memory_order_relaxed),
+                speakerEchoRms_.load(std::memory_order_relaxed));
+            echoReferenceRms = std::max(curEcho, echoReferenceRms * 0.80f);
 
             const int64_t nowMs = steadyNowMs();
             if (nowMs - lastLevelEmitMs >= 33) {
@@ -784,18 +830,24 @@ void OboeAudioEngine::vadLoop() {
             continue;
         }
 
-        // Prepare [1, 576] Silero VAD v5 frame: [64 context | 512 current]
+        // Prepare [1, 576] Silero VAD v5 frame: [64 context | 512 current] and DC-free AC RMS
         std::memcpy(input576.data(), context64.data(), kVadContextSamples * sizeof(float));
+        double sum = 0.0;
         double sumSq = 0.0;
         for (size_t i = 0; i < kVadFrameSamples; ++i) {
             const float f = static_cast<float>(frame512[i]) / 32768.0f;
             input576[kVadContextSamples + i] = f;
+            sum += static_cast<double>(f);
             sumSq += static_cast<double>(f) * static_cast<double>(f);
         }
         std::memcpy(context64.data(), input576.data() + kVadFrameSamples, kVadContextSamples * sizeof(float));
 
-        const float frameRms = static_cast<float>(std::sqrt(sumSq / static_cast<double>(kVadFrameSamples)));
+        const double invN = 1.0 / static_cast<double>(kVadFrameSamples);
+        const double mean = sum * invN;
+        const float frameRms = static_cast<float>(std::sqrt(std::max(0.0, (sumSq * invN) - (mean * mean))));
         const float speakerRms = currentSpeakerRms_.load(std::memory_order_relaxed);
+        const float speakerEnv = speakerEchoRms_.load(std::memory_order_relaxed);
+        echoReferenceRms = std::max(std::max(speakerRms, speakerEnv), echoReferenceRms * 0.80f);
 
         float vadProb = 0.0f;
         if (callbacks_.evaluateVad) {
@@ -822,27 +874,50 @@ void OboeAudioEngine::vadLoop() {
         if (curEpoch != prevObservedEpoch) {
             prevObservedEpoch = curEpoch;
         }
+        if (curState == EngineState::Listening && prevLoopState != EngineState::Listening && !inSpeech) {
+            // Discard stale speaker/room audio accumulated in preRoll before Listening resumed.
+            resetSpeechState();
+            bargeInSpeechFrames = 0;
+            bargeInEvidence = 0.0f;
+            manualCommitRequested_.store(false, std::memory_order_relaxed);
+        }
+        prevLoopState = curState;
 
         if (curState == EngineState::Listening) {
-            bargeInHoldFrames = 0;
+            bargeInSpeechFrames = 0;
+            bargeInEvidence = 0.0f;
             const float sens = vadSensitivity_.load(std::memory_order_relaxed);
-            const float listenThresh = clampFloat(0.62f - sens * 0.24f, 0.35f, 0.72f);
+            const float listenThresh = clampFloat(0.62f - sens * 0.22f, 0.36f, 0.72f);
+            const float sustainThresh = std::max(0.24f, listenThresh * 0.56f);
 
             if (!inSpeech) {
-                // Calibrate room noise floor when quiet
-                if (vadProb < listenThresh * 0.6f) {
-                    noiseFloorRms = noiseFloorRms * 0.96f + frameRms * 0.04f;
+                manualCommitRequested_.store(false, std::memory_order_relaxed);
+                // Calibrate ambient noise floor only outside speech and speaker echo tails.
+                if (vadProb < sustainThresh * 0.60f && echoReferenceRms < 0.005f) {
+                    noiseFloorRms = clampFloat(noiseFloorRms * 0.96f + frameRms * 0.04f, 0.002f, 0.06f);
                 }
                 preRoll.push(frame512.data(), kVadFrameSamples);
 
-                if (vadProb >= listenThresh) {
+                const float onsetEnergyFloor = std::max({
+                    0.010f,
+                    noiseFloorRms * 1.9f,
+                    echoReferenceRms * echoCouplingGain * 1.25f
+                });
+                if (vadProb >= listenThresh && frameRms > onsetEnergyFloor) {
                     ++onsetFrames;
-                    if (onsetFrames >= 2) {
+                    if (onsetFrames >= kSpeechOnsetFrames) {
                         inSpeech = true;
                         voicedFrames = onsetFrames;
-                        hangoverFrames = 0;
+                        currentGapFrames = 0;
+                        maxIntraGapFrames = 0;
+                        silenceCredits = 0.0f;
+                        recentPeakSpeechRms = frameRms;
                         utterancePcm.clear();
 
+                        // Notify speech onset BEFORE draining pre-roll so OS ASR pipe is open.
+                        if (callbacks_.onVadSpeechState) {
+                            callbacks_.onVadSpeechState(true);
+                        }
                         const size_t preCount = preRoll.size();
                         if (preCount > 0) {
                             utterancePcm.resize(preCount);
@@ -851,15 +926,12 @@ void OboeAudioEngine::vadLoop() {
                                 callbacks_.onAsrPcmFrame(utterancePcm.data(), preCount);
                             }
                         }
-                        if (callbacks_.onVadSpeechState) {
-                            callbacks_.onVadSpeechState(true);
-                        }
                     }
                 } else {
                     onsetFrames = 0;
                 }
             } else {
-                if (utterancePcm.size() + kVadFrameSamples <= kMaxUtteranceSamples) {
+                if (utterancePcm.size() + kVadFrameSamples <= kMaxWavSafetySamples) {
                     utterancePcm.insert(utterancePcm.end(), frame512.begin(), frame512.end());
                 }
 
@@ -867,40 +939,56 @@ void OboeAudioEngine::vadLoop() {
                     callbacks_.onAsrPcmFrame(frame512.data(), kVadFrameSamples);
                 }
 
-                if (vadProb >= listenThresh * 0.85f) {
-                    hangoverFrames = 0;
+                if (vadProb >= sustainThresh) {
+                    if (currentGapFrames > 0) {
+                        maxIntraGapFrames = std::max(maxIntraGapFrames, std::min<size_t>(currentGapFrames, 36));
+                    }
+                    currentGapFrames = 0;
+                    silenceCredits = 0.0f;
                     ++voicedFrames;
+                    recentPeakSpeechRms = std::max(frameRms, recentPeakSpeechRms * 0.985f);
                 } else {
-                    ++hangoverFrames;
+                    ++currentGapFrames;
+                    if (vadProb < sustainThresh * 0.45f && echoReferenceRms < 0.005f) {
+                        noiseFloorRms = clampFloat(noiseFloorRms * 0.96f + frameRms * 0.04f, 0.002f, 0.06f);
+                    }
+                    const bool deepSilence =
+                        (vadProb < sustainThresh * 0.40f) &&
+                        (frameRms <= std::max(noiseFloorRms * 1.6f, recentPeakSpeechRms * 0.18f));
+                    silenceCredits += deepSilence ? 1.0f : 0.45f;
                 }
 
-                const bool manualCommit = manualCommitRequested_.exchange(false, std::memory_order_acq_rel);
-                const bool maxCapHit = utterancePcm.size() >= kMaxUtteranceSamples;
+                // Adapt endpoint patience dynamically to speaker cadence, utterance length, and silence clarity.
+                const float cadenceBase = 14.0f + clampFloat(static_cast<float>(voicedFrames) * 0.15f, 0.0f, 9.0f);
+                const float cadenceFloor = (maxIntraGapFrames > 0)
+                    ? (static_cast<float>(maxIntraGapFrames) * 1.25f + 4.0f)
+                    : 0.0f;
+                const float sensShift = (0.5f - sens) * 6.0f;
+                const float requiredSilenceCredits = clampFloat(
+                    std::max(cadenceBase, cadenceFloor) + sensShift,
+                    13.0f,
+                    44.0f);
 
-                // Fix 1: Tight 64ms (2 frames) hangover; zero speculative pre-encode before endpointing.
-                if (hangoverFrames >= 2 || manualCommit || maxCapHit) {
-                    if (voicedFrames >= 4 || (manualCommit && utterancePcm.size() >= 1600)) {
+                const bool manualCommit = manualCommitRequested_.exchange(false, std::memory_order_acq_rel);
+                const bool wavSafetyHit = utterancePcm.size() >= kMaxWavSafetySamples;
+                const bool earlyTransientAbort =
+                    (voicedFrames < kMinUtteranceVoicedFrames) && (silenceCredits >= 7.0f);
+
+                if (silenceCredits >= requiredSilenceCredits || earlyTransientAbort || manualCommit || wavSafetyHit) {
+                    if (voicedFrames >= kMinUtteranceVoicedFrames ||
+                        (manualCommit && utterancePcm.size() >= 1600)) {
                         const auto wav = buildWavBytes(utterancePcm.data(), utterancePcm.size(), kCaptureTargetRate, 1);
-                        inSpeech = false;
-                        onsetFrames = 0;
-                        voicedFrames = 0;
-                        hangoverFrames = 0;
-                        preRoll.reset();
-                        utterancePcm.clear();
+                        resetSpeechState();
+                        transitionState(EngineState::Thinking);
                         if (callbacks_.onVadSpeechState) {
                             callbacks_.onVadSpeechState(false);
                         }
-                        transitionState(EngineState::Thinking);
                         if (callbacks_.onSpeechTurnReady) {
                             callbacks_.onSpeechTurnReady(wav);
                         }
                     } else {
-                        // Reject brief <128ms transient clicks
-                        inSpeech = false;
-                        onsetFrames = 0;
-                        voicedFrames = 0;
-                        hangoverFrames = 0;
-                        utterancePcm.clear();
+                        // Reject brief <128ms transient clicks; state remains Listening so OS ASR cancels cleanly.
+                        resetSpeechState();
                         if (callbacks_.onVadSpeechState) {
                             callbacks_.onVadSpeechState(false);
                         }
@@ -910,23 +998,52 @@ void OboeAudioEngine::vadLoop() {
         } else if (curState == EngineState::Speaking || curState == EngineState::Thinking) {
             preRoll.push(frame512.data(), kVadFrameSamples);
 
-            const bool pastPostPlayGuard =
-                (curState == EngineState::Thinking) ||
-                (nowMs - speakingStartedMs_.load(std::memory_order_acquire) >= 50);
+            const int64_t msSinceSpeakStart = nowMs - speakingStartedMs_.load(std::memory_order_acquire);
+            const bool pastPlayPropagation =
+                (curState == EngineState::Thinking) || (msSinceSpeakStart >= kMinPlaybackSettleMs);
 
-            // Dual-gate barge-in: Silero P(speech) > 0.78 + adaptive speaker echo floor for 96ms (3 frames)
-            const float echoFloor = std::max(0.015f, speakerRms * 1.45f);
-            if (pastPostPlayGuard && vadProb > 0.78f && frameRms > echoFloor) {
-                ++bargeInHoldFrames;
-                if (bargeInHoldFrames >= 3) {
+            // Continuously calibrate actual speaker-to-mic acoustic coupling outside double-talk surges.
+            if (curState == EngineState::Speaking && echoReferenceRms > 0.012f) {
+                const float observedRatio = clampFloat(frameRms / echoReferenceRms, 0.02f, 2.5f);
+                const float predictedEcho = echoReferenceRms * echoCouplingGain;
+                if (msSinceSpeakStart < 180) {
+                    echoCouplingGain = clampFloat(echoCouplingGain * 0.70f + observedRatio * 0.30f, 0.08f, 2.2f);
+                } else if (frameRms <= predictedEcho * 1.40f && bargeInEvidence < 1.5f) {
+                    echoCouplingGain = clampFloat(echoCouplingGain * 0.90f + observedRatio * 0.10f, 0.08f, 2.2f);
+                }
+            }
+
+            const float sens = vadSensitivity_.load(std::memory_order_relaxed);
+            const float bargeInProbThresh = clampFloat(0.82f - sens * 0.12f, 0.68f, 0.86f);
+            const float ambientFloor = std::max(0.018f, noiseFloorRms * 2.4f);
+            const float echoGate = echoReferenceRms * echoCouplingGain *
+                ((curState == EngineState::Speaking) ? 1.45f : 1.0f);
+            const float bargeInFloor = std::max(ambientFloor, echoGate);
+
+            if (pastPlayPropagation && vadProb >= bargeInProbThresh && frameRms > bargeInFloor) {
+                const float snrRatio = frameRms / std::max(0.005f, bargeInFloor);
+                const float strength = clampFloat(
+                    0.75f + (snrRatio - 1.0f) * 0.55f + (vadProb - bargeInProbThresh) * 2.0f,
+                    0.75f,
+                    1.75f);
+                bargeInEvidence += strength;
+                ++bargeInSpeechFrames;
+
+                const float targetEvidence = (curState == EngineState::Speaking) ? 8.5f : 7.0f;
+                if (bargeInEvidence >= targetEvidence && bargeInSpeechFrames >= kMinBargeInFrames) {
+                    const size_t confirmedFrames = bargeInSpeechFrames;
                     const int32_t committedOffset = interruptPlaybackAndAdvanceEpoch();
                     const int32_t newEpoch = currentTurnEpoch_.load(std::memory_order_acquire);
 
                     inSpeech = true;
-                    onsetFrames = 3;
-                    voicedFrames = 3;
-                    hangoverFrames = 0;
-                    bargeInHoldFrames = 0;
+                    onsetFrames = confirmedFrames;
+                    voicedFrames = confirmedFrames;
+                    currentGapFrames = 0;
+                    maxIntraGapFrames = 0;
+                    silenceCredits = 0.0f;
+                    recentPeakSpeechRms = frameRms;
+                    bargeInSpeechFrames = 0;
+                    bargeInEvidence = 0.0f;
 
                     // Transition and notify barge-in BEFORE draining pre-roll so OS ASR
                     // opens the new epoch's pipe before pre-roll PCM frames arrive.
@@ -938,12 +1055,13 @@ void OboeAudioEngine::vadLoop() {
                         callbacks_.onVadSpeechState(true);
                     }
 
-                    // Carry over short pre-roll (<=128ms) + barge-in onset so no syllables drop
+                    // Preserve confirmed barge-in onset (+2 lead-in frames) without stale speaker tail.
                     utterancePcm.clear();
                     if (preRoll.size() > 0) {
                         std::vector<int16_t> tmp(preRoll.size());
                         const size_t drained = preRoll.drainTo(tmp.data(), tmp.size());
-                        const size_t keep = std::min(drained, kBargeInPreRollCap);
+                        const size_t cap = std::min(kPreRollSamples, (confirmedFrames + 2) * kVadFrameSamples);
+                        const size_t keep = std::min(drained, cap);
                         const size_t offset = drained - keep;
                         utterancePcm.insert(utterancePcm.end(), tmp.begin() + offset, tmp.begin() + drained);
                         if (useOsAsrFallback_.load(std::memory_order_relaxed) && callbacks_.onAsrPcmFrame && keep > 0) {
@@ -951,18 +1069,23 @@ void OboeAudioEngine::vadLoop() {
                         }
                     }
                 }
+            } else if (pastPlayPropagation &&
+                       bargeInSpeechFrames >= 2 &&
+                       vadProb >= 0.48f &&
+                       frameRms > std::max(0.015f, noiseFloorRms * 1.9f)) {
+                bargeInEvidence = std::max(0.0f, bargeInEvidence - 0.35f);
+                if (bargeInEvidence <= 0.0f) {
+                    bargeInSpeechFrames = 0;
+                }
             } else {
-                bargeInHoldFrames = 0;
+                bargeInSpeechFrames = 0;
+                bargeInEvidence = 0.0f;
             }
         } else {
             // Idle or Interrupted
-            inSpeech = false;
-            onsetFrames = 0;
-            voicedFrames = 0;
-            hangoverFrames = 0;
-            bargeInHoldFrames = 0;
-            preRoll.reset();
-            utterancePcm.clear();
+            resetSpeechState();
+            bargeInSpeechFrames = 0;
+            bargeInEvidence = 0.0f;
         }
     }
 

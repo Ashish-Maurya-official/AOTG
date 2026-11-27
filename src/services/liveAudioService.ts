@@ -7,6 +7,7 @@ import NativeLiveAudio, {
 } from '../native/turbo_modules/LiveAudio/NativeLiveAudio';
 import {
   LiveInputMode,
+  LiveLanguage,
   LiveOutputRoute,
   LiveTalkState,
   LiveTtsEnginePref,
@@ -198,6 +199,29 @@ class LiveAudioServiceImpl {
     } catch (err) {
       console.warn('[LiveAudioService] Failed to save TTS preferences:', err);
     }
+  }
+
+  public async loadLanguagePreference(): Promise<LiveLanguage> {
+    try {
+      const raw = await AsyncStorage.getItem('@aotg/live_language');
+      return raw === 'en' || raw === 'hi' ? raw : 'auto';
+    } catch {
+      return 'auto';
+    }
+  }
+
+  public async saveLanguagePreference(language: LiveLanguage): Promise<void> {
+    try {
+      await AsyncStorage.setItem('@aotg/live_language', language);
+    } catch (err) {
+      console.warn('[LiveAudioService] Failed to save language preference:', err);
+    }
+  }
+
+  public async setLanguage(language: LiveLanguage): Promise<LiveLanguage> {
+    if (!this.isSupported() || !NativeLiveAudio) return language;
+    const applied = await NativeLiveAudio.setLanguage(language);
+    return applied === 'en' || applied === 'hi' ? applied : 'auto';
   }
 
   public async startSession(config: LiveAudioSessionConfig): Promise<LiveAudioStartResult> {

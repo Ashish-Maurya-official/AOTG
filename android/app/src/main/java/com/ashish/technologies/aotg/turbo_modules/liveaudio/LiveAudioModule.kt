@@ -75,7 +75,11 @@ class LiveAudioModule(
         private const val ENGINE_ANDROID_TTS = "android_tts"
 
         private const val SPOKEN_STYLE_DIRECTIVE =
-            "You are in a live voice conversation. Respond directly in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
+            "You are in a live voice conversation. Respond in the same language the user speaks (using Devanagari script for Hindi) in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
+        private const val SPOKEN_STYLE_DIRECTIVE_EN =
+            "You are in a live voice conversation. Always respond in clear, natural English spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
+        private const val SPOKEN_STYLE_DIRECTIVE_HI =
+            "You are in a live voice conversation. Always respond naturally in Hindi using Devanagari script in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
 
         @Volatile
         private var nativeLibLoaded = false
@@ -181,6 +185,11 @@ class LiveAudioModule(
 
     init {
         reactContext.registerComponentCallbacks(memoryCallbacks)
+        androidTtsEngine.onLanguageWarning = { msg ->
+            if (isSessionActive.get()) {
+                emitErrorEvent("WARN_TTS_LANGUAGE", msg, true)
+            }
+        }
     }
 
     private val isSessionActive = AtomicBoolean(false)
@@ -195,6 +204,9 @@ class LiveAudioModule(
     @Volatile private var inputMode: String = "audio_bytes"
     @Volatile private var activeRoutePref: String = "auto"
     @Volatile private var activeOutputRoute: String = "speaker"
+    @Volatile private var activeLanguagePref: String = "auto"
+    @Volatile private var userSystemPromptPref: String = ""
+    @Volatile private var pendingDirectiveRefresh: Boolean = false
     @Volatile private var effectiveSystemInstruction: String = SPOKEN_STYLE_DIRECTIVE
     @Volatile private var useOsAsrFallback: Boolean = false
 
@@ -314,6 +326,15 @@ class LiveAudioModule(
                     val vadSensitivity = if (config.hasKey("vadSensitivity")) config.getDouble("vadSensitivity").toFloat() else 0.5f
                     val speakerRoute = if (config.hasKey("speakerRoute")) config.getString("speakerRoute") ?: "auto" else "auto"
                     val userSystemPrompt = if (config.hasKey("systemInstruction")) config.getString("systemInstruction")?.trim().orEmpty() else ""
+                    val requestedLang = normalizeLanguagePref(
+                        if (config.hasKey("language")) config.getString("language") else null
+                    )
+                    activeLanguagePref = requestedLang
+                    userSystemPromptPref = userSystemPrompt
+                    pendingDirectiveRefresh = false
+                    asrEngine.preferredLanguage = requestedLang
+                    androidTtsEngine.setPreferredLanguage(requestedLang)
+
                     if (config.hasKey("ttsEngine")) {
                         ttsEnginePref = normalizeTtsPref(config.getString("ttsEngine"))
                     }
@@ -321,11 +342,7 @@ class LiveAudioModule(
                         selectedVoiceId = PhononModelManager.sanitizeVoiceId(config.getString("voiceId"))
                     }
 
-                    effectiveSystemInstruction = if (userSystemPrompt.isNotEmpty()) {
-                        "$SPOKEN_STYLE_DIRECTIVE\n\n$userSystemPrompt"
-                    } else {
-                        SPOKEN_STYLE_DIRECTIVE
-                    }
+                    effectiveSystemInstruction = buildEffectiveSystemInstruction(requestedLang, userSystemPrompt)
 
                     committedShadowHistory.clear()
                     if (config.hasKey("seedHistory")) {
@@ -628,6 +645,37 @@ class LiveAudioModule(
         }
     }
 
+    override fun setLanguage(language: String, promise: Promise) {
+        val normalized = normalizeLanguagePref(language)
+        activeLanguagePref = normalized
+        asrEngine.preferredLanguage = normalized
+        androidTtsEngine.setPreferredLanguage(normalized)
+        effectiveSystemInstruction = buildEffectiveSystemInstruction(normalized, userSystemPromptPref)
+
+        if (!isSessionActive.get()) {
+            pendingDirectiveRefresh = false
+            promise.resolve(normalized)
+            return
+        }
+
+        if (currentStateRef.get() == "LISTENING" && !vadSpeechActive.get()) {
+            pendingDirectiveRefresh = false
+            moduleScope.launch {
+                try {
+                    LLMModule.activeInstance?.stopAndRebuildLiveConversation(
+                        systemInstruction = effectiveSystemInstruction,
+                        committedHistory = committedShadowHistory.toList(),
+                        disableThinking = true
+                    )
+                } catch (_: Throwable) {}
+                promise.resolve(normalized)
+            }
+        } else {
+            pendingDirectiveRefresh = true
+            promise.resolve(normalized)
+        }
+    }
+
     override fun addListener(eventName: String) {
         listenerCount++
     }
@@ -679,10 +727,13 @@ class LiveAudioModule(
     @Keep
     fun onNativeVadSpeechState(speaking: Boolean) {
         vadSpeechActive.set(speaking)
-        if (useOsAsrFallback && speaking && isSessionActive.get()) {
+        if (!isSessionActive.get() || !useOsAsrFallback) return
+        if (speaking) {
             val epoch = nativeGetTurnEpoch()
             activeTurnEpoch.set(epoch)
             asrEngine.beginUtterance(epoch)
+        } else if (currentStateRef.get() == "LISTENING") {
+            asrEngine.cancelCurrent()
         }
     }
 
@@ -832,16 +883,20 @@ class LiveAudioModule(
 
         if (turnEpoch != activeTurnEpoch.get() || !isSessionActive.get()) return
 
-        // Enforce 75% KV-cache sliding window budget cleanly before new turn
+        // Enforce 75% KV-cache sliding window budget or apply pending language change before new turn
         val usedTokens = llm.getLiveContextTokenCount()
         val maxTokens = maxOf(512, llm.getActiveMaxTokens())
-        if (usedTokens > (maxTokens * 0.75).toInt() && committedShadowHistory.size > 4) {
+        val compactHistory = usedTokens > (maxTokens * 0.75).toInt() && committedShadowHistory.size > 4
+        if (compactHistory) {
             val compacted = committedShadowHistory.takeLast(4)
             committedShadowHistory.clear()
             committedShadowHistory.addAll(compacted)
+        }
+        if (compactHistory || pendingDirectiveRefresh) {
+            pendingDirectiveRefresh = false
             llm.stopAndRebuildLiveConversation(
                 systemInstruction = effectiveSystemInstruction,
-                committedHistory = compacted,
+                committedHistory = committedShadowHistory.toList(),
                 disableThinking = true
             )
         }
@@ -1463,6 +1518,27 @@ class LiveAudioModule(
         }
     }
 
+    private fun normalizeLanguagePref(raw: String?): String {
+        return when (raw?.trim()?.lowercase()) {
+            "hi", "hi-in", "hindi" -> "hi"
+            "en", "en-us", "en-in", "en-gb", "english" -> "en"
+            else -> "auto"
+        }
+    }
+
+    private fun buildEffectiveSystemInstruction(language: String, userPrompt: String): String {
+        val baseDirective = when (language) {
+            "hi" -> SPOKEN_STYLE_DIRECTIVE_HI
+            "en" -> SPOKEN_STYLE_DIRECTIVE_EN
+            else -> SPOKEN_STYLE_DIRECTIVE
+        }
+        return if (userPrompt.isNotEmpty()) {
+            "$baseDirective\n\n$userPrompt"
+        } else {
+            baseDirective
+        }
+    }
+
     private suspend fun prepareActiveTtsEngineForSession(): Boolean {
         val wantsPhonon = when (ttsEnginePref) {
             ENGINE_ANDROID_TTS, androidTtsEngine.name -> false
@@ -1498,7 +1574,18 @@ class LiveAudioModule(
     }
 
     private suspend fun synthesizeClauseWithFallback(clause: QueuedClause) {
-        val engine = activeTtsEngine
+        val isDevanagari = AndroidStreamingTtsEngine.containsDevanagari(clause.text)
+        val preferAndroidForHindi =
+            activeLanguagePref == "hi" && ttsEnginePref != PhononStreamingTtsEngine.ENGINE_NAME
+        val engine = if (
+            activeTtsEngine === phononTtsEngine &&
+            (isDevanagari || preferAndroidForHindi) &&
+            androidTtsEngine.initialize()
+        ) {
+            androidTtsEngine
+        } else {
+            activeTtsEngine
+        }
         val emittedAnyPcm = AtomicBoolean(false)
         val ok = engine.synthesizeClauseBlocking(
             clauseText = clause.text,

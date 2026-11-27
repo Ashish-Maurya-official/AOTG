@@ -25,6 +25,7 @@ import Reanimated, {
 import { useTheme } from '../theme/ThemeProvider';
 import {
   LiveCaptionTurn,
+  LiveLanguage,
   LiveOutputRoute,
   LiveTalkSliceState,
   LiveTtsEnginePref,
@@ -52,6 +53,7 @@ interface LiveTalkModalProps {
   onDeletePhonon: () => void;
   onSelectTtsEngine: (engine: LiveTtsEnginePref) => void;
   onSelectVoice: (voiceId: string) => void;
+  onSelectLanguage?: (language: LiveLanguage) => void;
 }
 
 interface RouteOptionSpec {
@@ -374,6 +376,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
     onDeletePhonon,
     onSelectTtsEngine,
     onSelectVoice,
+    onSelectLanguage,
   }) => {
     const { mode, colors } = useTheme();
     const insets = useSafeAreaInsets();
@@ -700,6 +703,25 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       onSelectTtsEngine('android_tts');
     }, [onSelectTtsEngine]);
 
+    const handleSelectLangAuto = useCallback(() => {
+      onSelectLanguage?.('auto');
+    }, [onSelectLanguage]);
+
+    const handleSelectLangEn = useCallback(() => {
+      onSelectLanguage?.('en');
+    }, [onSelectLanguage]);
+
+    const handleSelectLangHi = useCallback(() => {
+      onSelectLanguage?.('hi');
+    }, [onSelectLanguage]);
+
+    const handleCycleLanguage = useCallback(() => {
+      if (!onSelectLanguage) return;
+      const next: LiveLanguage =
+        liveTalk.language === 'auto' ? 'hi' : liveTalk.language === 'hi' ? 'en' : 'auto';
+      onSelectLanguage(next);
+    }, [liveTalk.language, onSelectLanguage]);
+
     const handleConfirmDeletePhonon = useCallback(() => {
       const mb = formatMegabytes(liveTalk.phononDiskBytes || liveTalk.phononExpectedBytes);
       Alert.alert(
@@ -840,6 +862,21 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                 {liveTalk.vadBackend === 'silero_onnx' ? ' · SILERO VAD V5' : ' · ADAPTIVE VAD'}
                 {isUsingPhonon ? ` · PHONON (${activeVoiceLabel.toUpperCase()})` : ' · DEVICE TTS'}
               </Text>
+              {onSelectLanguage ? (
+                <Pressable
+                  onPress={handleCycleLanguage}
+                  accessibilityRole="button"
+                  accessibilityLabel="Switch conversation language between Auto, Hindi, and English"
+                  style={[styles.langQuickPill, dynamicStyles.elevatedPill]}>
+                  <Text style={[styles.langQuickPillText, dynamicStyles.accentTealText]}>
+                    {liveTalk.language === 'hi'
+                      ? 'LANG: हिन्दी (HI)'
+                      : liveTalk.language === 'en'
+                      ? 'LANG: ENGLISH'
+                      : 'LANG: AUTO (EN / हिन्दी)'}
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
 
             {/* 3. Compact Quick Voice Banner */}
@@ -1116,6 +1153,76 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                 style={styles.sheetScroll}
                 contentContainerStyle={styles.sheetScrollContent}
                 showsVerticalScrollIndicator={false}>
+                {onSelectLanguage ? (
+                  <>
+                    <Text style={[styles.personaSectionTitle, dynamicStyles.secondaryText]}>
+                      CONVERSATION LANGUAGE
+                    </Text>
+                    <View style={[styles.engineSegmentTrack, dynamicStyles.segmentTrack]}>
+                      <Pressable
+                        onPress={handleSelectLangAuto}
+                        accessibilityRole="button"
+                        accessibilityLabel="Auto detect language"
+                        style={[
+                          styles.engineSegmentBtn,
+                          liveTalk.language === 'auto'
+                            ? dynamicStyles.segmentSelected
+                            : dynamicStyles.segmentUnselected,
+                        ]}>
+                        <Text
+                          style={[
+                            styles.engineSegmentText,
+                            liveTalk.language === 'auto'
+                              ? dynamicStyles.primaryText
+                              : dynamicStyles.secondaryText,
+                          ]}>
+                          Auto
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={handleSelectLangEn}
+                        accessibilityRole="button"
+                        accessibilityLabel="Select English"
+                        style={[
+                          styles.engineSegmentBtn,
+                          liveTalk.language === 'en'
+                            ? dynamicStyles.segmentSelected
+                            : dynamicStyles.segmentUnselected,
+                        ]}>
+                        <Text
+                          style={[
+                            styles.engineSegmentText,
+                            liveTalk.language === 'en'
+                              ? dynamicStyles.primaryText
+                              : dynamicStyles.secondaryText,
+                          ]}>
+                          English
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={handleSelectLangHi}
+                        accessibilityRole="button"
+                        accessibilityLabel="Select Hindi"
+                        style={[
+                          styles.engineSegmentBtn,
+                          liveTalk.language === 'hi'
+                            ? dynamicStyles.segmentSelected
+                            : dynamicStyles.segmentUnselected,
+                        ]}>
+                        <Text
+                          style={[
+                            styles.engineSegmentText,
+                            liveTalk.language === 'hi'
+                              ? dynamicStyles.primaryText
+                              : dynamicStyles.secondaryText,
+                          ]}>
+                          हिन्दी (Hindi)
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </>
+                ) : null}
+
                 {/* Engine Segmented Selector */}
                 <View style={[styles.engineSegmentTrack, dynamicStyles.segmentTrack]}>
                   <Pressable
@@ -1514,6 +1621,18 @@ const styles = StyleSheet.create({
     marginTop: 4,
     textAlign: 'center',
     letterSpacing: 0.8,
+  },
+  langQuickPill: {
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  langQuickPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.6,
   },
   voiceBanner: {
     borderWidth: 1,
