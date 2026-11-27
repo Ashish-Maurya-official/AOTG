@@ -694,6 +694,9 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
         downloadPhononModel,
         cancelPhononDownload,
         deletePhononModel,
+        downloadSpeechModel,
+        cancelSpeechModelDownload,
+        deleteSpeechModel,
         selectTtsEngine,
         selectVoice,
         selectLanguage,
@@ -1651,6 +1654,9 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                     onDownloadPhonon={downloadPhononModel}
                     onCancelPhononDownload={cancelPhononDownload}
                     onDeletePhonon={deletePhononModel}
+                    onDownloadSpeechModel={downloadSpeechModel}
+                    onCancelSpeechModelDownload={cancelSpeechModelDownload}
+                    onDeleteSpeechModel={deleteSpeechModel}
                     onSelectTtsEngine={selectTtsEngine}
                     onSelectVoice={selectVoice}
                     onSelectLanguage={selectLanguage}

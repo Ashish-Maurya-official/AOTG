@@ -84,7 +84,15 @@ internal class AndroidStreamingTtsEngine(private val context: Context) : Streami
             val def = Locale.getDefault()
             return if (def.language == "en") def else Locale.US
         }
-        return Locale.getDefault()
+        val def = Locale.getDefault()
+        return if (def.language == "hi" && containsAsciiLetters(text)) Locale.US else def
+    }
+
+    private fun containsAsciiLetters(text: String): Boolean {
+        for (ch in text) {
+            if (ch in 'a'..'z' || ch in 'A'..'Z') return true
+        }
+        return false
     }
 
     private fun applyLocaleForClause(engine: TextToSpeech, text: String) {

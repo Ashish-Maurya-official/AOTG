@@ -5,7 +5,8 @@ import NativeLiveAudio, {
   LiveAudioSessionConfig,
   LiveAudioStartResult,
 } from '../native/turbo_modules/LiveAudio/NativeLiveAudio';
-import {
+import { isValidTtsEnginePref } from '../utils/speechModels';
+import type {
   LiveInputMode,
   LiveLanguage,
   LiveOutputRoute,
@@ -62,6 +63,7 @@ export interface LiveErrorEvent {
 }
 
 export interface TtsDownloadProgressEvent {
+  modelId?: string;
   status: PhononDownloadStatus;
   percent: number;
   downloadedBytes: number;
@@ -133,9 +135,31 @@ class LiveAudioServiceImpl {
         selectedVoiceId: 'easton',
         downloadedVoices: [],
         availableVoices: [],
+        ttsModels: [],
       };
     }
     return NativeLiveAudio.getCapabilities();
+  }
+
+  public async downloadTtsModel(modelId: string, voiceId: string = ''): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.downloadTtsModel(modelId, voiceId);
+  }
+
+  public async cancelTtsModelDownload(modelId: string): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.cancelTtsModelDownload(modelId);
+  }
+
+  public async deleteTtsModel(modelId: string): Promise<boolean> {
+    if (!this.isSupported() || !NativeLiveAudio) {
+      return false;
+    }
+    return NativeLiveAudio.deleteTtsModel(modelId);
   }
 
   public async downloadPhononModel(
@@ -177,12 +201,9 @@ class LiveAudioServiceImpl {
       const raw = await AsyncStorage.getItem(LIVE_TTS_PREFS_STORAGE_KEY);
       if (!raw) return DEFAULT_TTS_PREFERENCES;
       const parsed = JSON.parse(raw);
-      const engine: LiveTtsEnginePref =
-        parsed?.ttsEngine === 'phonon_31m' ||
-        parsed?.ttsEngine === 'android_tts' ||
-        parsed?.ttsEngine === 'auto'
-          ? parsed.ttsEngine
-          : 'auto';
+      const engine: LiveTtsEnginePref = isValidTtsEnginePref(parsed?.ttsEngine)
+        ? parsed.ttsEngine
+        : 'auto';
       const voiceId =
         typeof parsed?.voiceId === 'string' && parsed.voiceId.trim().length > 0
           ? parsed.voiceId.trim().toLowerCase()

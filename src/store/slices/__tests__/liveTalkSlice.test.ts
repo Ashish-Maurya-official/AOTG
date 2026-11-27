@@ -29,6 +29,8 @@ import reducer, {
   closeLiveTalkModal,
   commitLiveTurn,
   DEFAULT_PHONON_VOICES,
+  DEFAULT_SPEECH_MODELS,
+  isValidTtsEnginePref,
   openLiveTalkModal,
   seedModalTurns,
   sessionStarted,
@@ -39,6 +41,7 @@ import reducer, {
   setPreferredRoute,
   setSessionStarting,
   setSessionState,
+  setSpeechModelDownloadProgress,
   setTtsPreference,
   setVadSpeechActive,
   updateRouteOrFocus,
@@ -243,5 +246,71 @@ describe('liveTalkSlice', () => {
 
     state = reducer(state, setLiveLanguage('en'));
     expect(state.language).toBe('en');
+  });
+
+  it('tracks multi-model Hindi and English neural speech downloads and selection', () => {
+    expect(DEFAULT_SPEECH_MODELS.map((m) => m.id)).toEqual(
+      expect.arrayContaining([
+        'mms_tts_hin',
+        'indic_tiny_hi',
+        'piper_hi',
+        'kokoro_multi',
+        'piper_en',
+        'kitten_en',
+        'pocket_tts',
+      ])
+    );
+    expect(isValidTtsEnginePref('mms_tts_hin')).toBe(true);
+    expect(isValidTtsEnginePref('indic_tiny_hi')).toBe(true);
+    expect(isValidTtsEnginePref('piper_hi')).toBe(true);
+    expect(isValidTtsEnginePref('unknown_engine')).toBe(false);
+
+    let state = reducer(undefined, openLiveTalkModal());
+    state = reducer(
+      state,
+      setSpeechModelDownloadProgress({
+        modelId: 'piper_hi',
+        status: 'downloading',
+        percent: 60,
+        downloadedBytes: 12_600_000,
+        totalBytes: 21_064_499,
+      })
+    );
+    expect(state.speechDownloads.piper_hi.status).toBe('downloading');
+    expect(state.ttsModels.find((m) => m.id === 'piper_hi')?.downloading).toBe(true);
+
+    state = reducer(
+      state,
+      setSpeechModelDownloadProgress({
+        modelId: 'piper_hi',
+        status: 'completed',
+        percent: 100,
+        downloadedBytes: 21_064_499,
+        totalBytes: 21_064_499,
+      })
+    );
+    expect(state.speechDownloads.piper_hi.status).toBe('ready');
+    expect(state.ttsModels.find((m) => m.id === 'piper_hi')?.installed).toBe(true);
+    expect(state.ttsBackend).toBe('piper_hi');
+
+    const updatedModels = state.ttsModels.map((m) =>
+      m.id === 'indic_tiny_hi' ? { ...m, installed: true, installedBytes: 91_021_687 } : m
+    );
+    state = reducer(
+      state,
+      applyTtsCapabilities({
+        phononInstalled: false,
+        phononDownloading: false,
+        phononExpectedBytes: 68_565_296,
+        phononDiskBytes: 0,
+        phononVariant: '',
+        selectedTtsEngine: 'indic_tiny_hi',
+        selectedVoiceId: 'male',
+        ttsModels: updatedModels,
+      })
+    );
+    expect(state.ttsEnginePref).toBe('indic_tiny_hi');
+    expect(state.ttsBackend).toBe('indic_tiny_hi');
+    expect(state.selectedVoiceId).toBe('male');
   });
 });
