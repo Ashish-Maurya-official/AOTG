@@ -40,6 +40,33 @@ export interface PhononVoiceInfo {
   downloaded: boolean;
 }
 
+export interface SpeechVoiceInfo {
+  id: string;
+  label: string;
+  description: string;
+  language: string;
+  downloaded: boolean;
+}
+
+export interface SpeechModelInfo {
+  id: string;
+  label: string;
+  subtitle: string;
+  engineFamily: string;
+  languages: Array<string>;
+  sampleRate: number;
+  estimatedBytes: number;
+  installedBytes: number;
+  installed: boolean;
+  downloading: boolean;
+  percent: number;
+  supportsHindi: boolean;
+  supportsEnglish: boolean;
+  defaultVoiceId: string;
+  installedVoices: Array<string>;
+  voices: Array<SpeechVoiceInfo>;
+}
+
 export interface LiveAudioCapabilities {
   hasSileroModel: boolean;
   hasDeviceAsr: boolean;
@@ -58,6 +85,7 @@ export interface LiveAudioCapabilities {
   selectedVoiceId: string;
   downloadedVoices: Array<string>;
   availableVoices: Array<PhononVoiceInfo>;
+  ttsModels: Array<SpeechModelInfo>;
 }
 
 export interface Spec extends TurboModule {
@@ -71,6 +99,9 @@ export interface Spec extends TurboModule {
   downloadPhononModel(variant: string, voiceId: string): Promise<boolean>;
   cancelPhononDownload(): Promise<boolean>;
   deletePhononModel(): Promise<boolean>;
+  downloadTtsModel(modelId: string, voiceId: string): Promise<boolean>;
+  cancelTtsModelDownload(modelId: string): Promise<boolean>;
+  deleteTtsModel(modelId: string): Promise<boolean>;
   setTtsConfig(ttsEngine: string, voiceId: string): Promise<LiveAudioCapabilities>;
   setLanguage(language: string): Promise<string>;
   addListener(eventName: string): void;

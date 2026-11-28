@@ -74,8 +74,23 @@ class LiveAudioModule(
         private const val EVENT_ERROR = "onError"
         private const val ENGINE_ANDROID_TTS = "android_tts"
 
+        private val AUTO_HINDI_PRIORITY = listOf(
+            SpeechModelManager.KOKORO_MULTI_ID,
+            SpeechModelManager.INDIC_TINY_HI_ID,
+            SpeechModelManager.PIPER_HI_ID,
+            SpeechModelManager.MMS_TTS_HIN_ID,
+        )
+
+        private val AUTO_ENGLISH_PRIORITY = listOf(
+            SpeechModelManager.KOKORO_MULTI_ID,
+            PhononStreamingTtsEngine.ENGINE_NAME,
+            SpeechModelManager.POCKET_TTS_ID,
+            SpeechModelManager.KITTEN_EN_ID,
+            SpeechModelManager.PIPER_EN_ID,
+        )
+
         private const val SPOKEN_STYLE_DIRECTIVE =
-            "You are in a live voice conversation. Respond in the same language the user speaks (using Devanagari script for Hindi) in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
+            "You are in a live voice conversation. Detect the language of the user's message and respond naturally in that exact same language using its standard script in clear, natural spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
         private const val SPOKEN_STYLE_DIRECTIVE_EN =
             "You are in a live voice conversation. Always respond in clear, natural English spoken sentences without markdown, asterisks, bullet lists, code blocks, or emojis."
         private const val SPOKEN_STYLE_DIRECTIVE_HI =
@@ -155,6 +170,15 @@ class LiveAudioModule(
     private val androidTtsEngine = AndroidStreamingTtsEngine(reactContext)
     private val phononModelManager = PhononModelManager(reactContext)
     private val phononTtsEngine = PhononStreamingTtsEngine(phononModelManager)
+    private val speechModelManager = SpeechModelManager(reactContext)
+    private val mmsHindiTtsEngine = MmsHindiStreamingTtsEngine {
+        speechModelManager.getModelDir(SpeechModelManager.MMS_TTS_HIN_ID)
+    }
+    private val indicTinyHindiTtsEngine = IndicTinyHindiStreamingTtsEngine {
+        speechModelManager.getModelDir(SpeechModelManager.INDIC_TINY_HI_ID)
+    }
+    private val sherpaTtsEngine = SherpaStreamingTtsEngine(speechModelManager)
+    private val selectedVoicesByModel = ConcurrentHashMap<String, String>()
     @Volatile private var activeTtsEngine: StreamingTtsEngine = androidTtsEngine
     @Volatile private var ttsEnginePref: String = "auto"
     @Volatile private var selectedVoiceId: String = PhononModelManager.DEFAULT_VOICE_ID
@@ -166,11 +190,16 @@ class LiveAudioModule(
         override fun onTrimMemory(level: Int) {
             if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
                 if (!memoryPressureDegraded) {
-                    Log.w(TAG, "Low memory trim (level=$level) — releasing idle Phonon-31M sessions")
+                    Log.w(TAG, "Low memory trim (level=$level) — releasing idle neural TTS sessions")
                     memoryPressureDegraded = true
                     phononTtsEngine.releaseMemoryIfIdle()
-                    if (activeTtsEngine === phononTtsEngine && !isSessionActive.get()) {
-                        activeTtsEngine = androidTtsEngine
+                    if (!isSessionActive.get()) {
+                        mmsHindiTtsEngine.shutdown()
+                        indicTinyHindiTtsEngine.shutdown()
+                        sherpaTtsEngine.shutdown()
+                        if (activeTtsEngine !== androidTtsEngine) {
+                            activeTtsEngine = androidTtsEngine
+                        }
                     }
                     emitTtsConfigChangedEvent()
                 }
@@ -342,7 +371,19 @@ class LiveAudioModule(
                         ttsEnginePref = normalizeTtsPref(config.getString("ttsEngine"))
                     }
                     if (config.hasKey("voiceId")) {
-                        selectedVoiceId = PhononModelManager.sanitizeVoiceId(config.getString("voiceId"))
+                        val rawVoice = config.getString("voiceId")
+                        val speechSpec = speechModelManager.findSpec(ttsEnginePref)
+                        if (speechSpec != null) {
+                            val resolved = speechModelManager.resolveVoiceId(speechSpec.id, rawVoice)
+                            selectedVoicesByModel[speechSpec.id] = resolved
+                            selectedVoiceId = resolved
+                        } else {
+                            selectedVoiceId = PhononModelManager.sanitizeVoiceId(rawVoice)
+                        }
+                    } else {
+                        speechModelManager.findSpec(ttsEnginePref)?.let { spec ->
+                            selectedVoiceId = selectedVoicesByModel[spec.id] ?: spec.defaultVoiceId
+                        }
                     }
 
                     effectiveSystemInstruction = buildEffectiveSystemInstruction(requestedLang, userSystemPrompt)
@@ -592,32 +633,164 @@ class LiveAudioModule(
         }
     }
 
+    override fun downloadTtsModel(modelId: String, voiceId: String, promise: Promise) {
+        val cleanId = normalizeTtsPref(modelId)
+        if (cleanId == PhononStreamingTtsEngine.ENGINE_NAME) {
+            downloadPhononModel(PhononModelManager.VARIANT_Q4, voiceId, promise)
+            return
+        }
+        val spec = speechModelManager.findSpec(cleanId)
+        if (spec == null) {
+            promise.reject("ERR_TTS_UNKNOWN", "Unknown speech model: $modelId")
+            return
+        }
+        val resolvedVoice = speechModelManager.resolveVoiceId(spec.id, voiceId.ifBlank { selectedVoicesByModel[spec.id] })
+        selectedVoicesByModel[spec.id] = resolvedVoice
+
+        moduleScope.launch {
+            try {
+                emitTtsConfigChangedEvent()
+                val res = speechModelManager.downloadModel(spec.id, resolvedVoice) { progress ->
+                    emitSpeechDownloadProgressEvent(progress)
+                }
+                if (res.isSuccess) {
+                    memoryPressureDegraded = false
+                    ttsEnginePref = spec.id
+                    selectedVoiceId = resolvedVoice
+                    tryPrepareEngine(spec.id, resolvedVoice)?.let { ready ->
+                        activeTtsEngine = ready
+                    }
+                    emitTtsConfigChangedEvent()
+                    promise.resolve(true)
+                } else {
+                    emitTtsConfigChangedEvent()
+                    promise.resolve(false)
+                }
+            } catch (t: Throwable) {
+                emitTtsConfigChangedEvent()
+                promise.reject("ERR_TTS_DOWNLOAD", t.message ?: "Failed to download ${spec.label}.", t)
+            }
+        }
+    }
+
+    override fun cancelTtsModelDownload(modelId: String, promise: Promise) {
+        val cleanId = SpeechModelManager.sanitizeModelId(modelId)
+        if (cleanId == PhononStreamingTtsEngine.ENGINE_NAME) {
+            cancelPhononDownload(promise)
+            return
+        }
+        speechModelManager.cancelDownload(cleanId)
+        emitTtsConfigChangedEvent()
+        promise.resolve(true)
+    }
+
+    override fun deleteTtsModel(modelId: String, promise: Promise) {
+        val cleanId = SpeechModelManager.sanitizeModelId(modelId)
+        if (cleanId == PhononStreamingTtsEngine.ENGINE_NAME) {
+            deletePhononModel(promise)
+            return
+        }
+        val spec = speechModelManager.findSpec(cleanId)
+        if (spec == null) {
+            promise.resolve(false)
+            return
+        }
+        moduleScope.launch {
+            try {
+                if (activeTtsEngine.name == spec.id) {
+                    stopAllTtsEngines()
+                    androidTtsEngine.initialize()
+                    activeTtsEngine = androidTtsEngine
+                }
+                when (spec.id) {
+                    SpeechModelManager.MMS_TTS_HIN_ID -> mmsHindiTtsEngine.shutdown()
+                    SpeechModelManager.INDIC_TINY_HI_ID -> indicTinyHindiTtsEngine.shutdown()
+                    else -> if (sherpaTtsEngine.getConfiguredModelId() == spec.id) {
+                        sherpaTtsEngine.shutdown()
+                    }
+                }
+                val deleted = speechModelManager.deleteModel(spec.id)
+                if (ttsEnginePref == spec.id) {
+                    ttsEnginePref = "auto"
+                }
+                memoryPressureDegraded = false
+                emitTtsConfigChangedEvent()
+                emitSpeechDownloadProgressEvent(
+                    SpeechModelManager.DownloadProgress(
+                        modelId = spec.id,
+                        state = "idle",
+                        downloadedBytes = 0L,
+                        totalBytes = spec.estimatedBytes,
+                        percent = 0,
+                    ),
+                )
+                promise.resolve(deleted)
+            } catch (t: Throwable) {
+                promise.reject("ERR_TTS_DELETE", t.message ?: "Failed to delete ${spec.label}.", t)
+            }
+        }
+    }
+
     override fun setTtsConfig(ttsEngine: String, voiceId: String, promise: Promise) {
         val nextPref = normalizeTtsPref(ttsEngine)
-        val nextVoice = if (voiceId.isNotBlank()) {
-            PhononModelManager.sanitizeVoiceId(voiceId)
-        } else {
-            selectedVoiceId
+        val speechSpec = speechModelManager.findSpec(nextPref)
+        val nextVoice = when {
+            speechSpec != null -> {
+                val requested = if (voiceId.isNotBlank()) voiceId else selectedVoicesByModel[speechSpec.id]
+                val resolved = speechModelManager.resolveVoiceId(speechSpec.id, requested)
+                selectedVoicesByModel[speechSpec.id] = resolved
+                resolved
+            }
+            voiceId.isNotBlank() -> PhononModelManager.sanitizeVoiceId(voiceId)
+            else -> selectedVoiceId
         }
         ttsEnginePref = nextPref
         selectedVoiceId = nextVoice
-        phononTtsEngine.setPreferredVoiceId(nextVoice)
-        if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME) {
+        if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME || nextPref == "auto") {
+            phononTtsEngine.setPreferredVoiceId(
+                if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME) nextVoice
+                else PhononModelManager.sanitizeVoiceId(selectedVoicesByModel[PhononStreamingTtsEngine.ENGINE_NAME] ?: nextVoice),
+            )
+        }
+        if (nextPref != ENGINE_ANDROID_TTS && nextPref != "auto") {
             memoryPressureDegraded = false
         }
 
         moduleScope.launch {
             try {
                 if (nextPref == ENGINE_ANDROID_TTS || nextPref == androidTtsEngine.name) {
-                    phononTtsEngine.stopCurrent()
+                    stopAllTtsEngines()
                     androidTtsEngine.initialize()
                     activeTtsEngine = androidTtsEngine
+                } else if (speechSpec != null && !memoryPressureDegraded) {
+                    if (speechSpec.packageKind == SpeechModelManager.PackageKind.TAR_BZ2_PER_VOICE &&
+                        !speechModelManager.isVoiceInstalled(speechSpec.id, nextVoice)
+                    ) {
+                        speechModelManager.downloadModel(speechSpec.id, nextVoice) { progress ->
+                            emitSpeechDownloadProgressEvent(progress)
+                        }
+                    }
+                    val prepared = tryPrepareEngine(speechSpec.id, nextVoice)
+                    if (prepared != null) {
+                        activeTtsEngine = prepared
+                    } else {
+                        androidTtsEngine.initialize()
+                        activeTtsEngine = androidTtsEngine
+                        emitErrorEvent(
+                            "WARN_TTS_FALLBACK",
+                            "${speechSpec.label} is not ready yet; using device TTS fallback.",
+                            true,
+                        )
+                    }
                 } else if (phononModelManager.isCoreInstalled() && !memoryPressureDegraded) {
-                    val voiceReady = phononModelManager.isVoiceDownloaded(nextVoice) ||
-                        phononModelManager.ensureVoiceDownloaded(nextVoice)
+                    val phononVoice = PhononModelManager.sanitizeVoiceId(
+                        selectedVoicesByModel[PhononStreamingTtsEngine.ENGINE_NAME] ?: nextVoice,
+                    )
+                    val voiceReady = phononModelManager.isVoiceDownloaded(phononVoice) ||
+                        phononModelManager.ensureVoiceDownloaded(phononVoice)
                     if (voiceReady) {
                         val phononReady = if (phononTtsEngine.isInitialized()) {
-                            phononTtsEngine.switchVoice(nextVoice)
+                            phononTtsEngine.switchVoice(phononVoice)
                         } else {
                             phononTtsEngine.initialize()
                         }
@@ -635,7 +808,7 @@ class LiveAudioModule(
                     } else if (nextPref == PhononStreamingTtsEngine.ENGINE_NAME) {
                         emitErrorEvent(
                             "WARN_PHONON_VOICE",
-                            "Could not download voice '$nextVoice'.",
+                            "Could not download voice '$phononVoice'.",
                             true,
                         )
                     }
@@ -698,6 +871,9 @@ class LiveAudioModule(
         } catch (_: Throwable) {}
         vadEngine.close()
         phononTtsEngine.shutdown()
+        mmsHindiTtsEngine.shutdown()
+        indicTinyHindiTtsEngine.shutdown()
+        sherpaTtsEngine.shutdown()
         androidTtsEngine.shutdown()
         asrEngine.shutdown()
         moduleScope.cancel()
@@ -1517,10 +1693,11 @@ class LiveAudioModule(
     }
 
     private fun normalizeTtsPref(raw: String?): String {
-        return when (raw?.trim()?.lowercase()) {
+        val clean = raw?.trim()?.lowercase().orEmpty()
+        return when (clean) {
             PhononStreamingTtsEngine.ENGINE_NAME -> PhononStreamingTtsEngine.ENGINE_NAME
             ENGINE_ANDROID_TTS, "device", "system" -> ENGINE_ANDROID_TTS
-            else -> "auto"
+            else -> speechModelManager.findSpec(clean)?.id ?: "auto"
         }
     }
 
@@ -1545,26 +1722,81 @@ class LiveAudioModule(
         }
     }
 
+    private suspend fun tryPrepareEngine(engineId: String, voiceOverride: String? = null): StreamingTtsEngine? {
+        if (memoryPressureDegraded && engineId != ENGINE_ANDROID_TTS) return null
+        return when (engineId) {
+            ENGINE_ANDROID_TTS -> if (androidTtsEngine.initialize()) androidTtsEngine else null
+            PhononStreamingTtsEngine.ENGINE_NAME -> {
+                if (!phononModelManager.isCoreInstalled()) return null
+                val voice = PhononModelManager.sanitizeVoiceId(voiceOverride ?: selectedVoiceId)
+                phononTtsEngine.setPreferredVoiceId(voice)
+                if (phononTtsEngine.initialize()) {
+                    selectedVoiceId = phononTtsEngine.getSelectedVoiceId()
+                    phononTtsEngine
+                } else null
+            }
+            SpeechModelManager.MMS_TTS_HIN_ID -> {
+                if (!speechModelManager.isModelInstalled(engineId)) return null
+                if (mmsHindiTtsEngine.initialize()) mmsHindiTtsEngine else null
+            }
+            SpeechModelManager.INDIC_TINY_HI_ID -> {
+                if (!speechModelManager.isModelInstalled(engineId)) return null
+                val voice = speechModelManager.resolveVoiceId(
+                    engineId,
+                    voiceOverride ?: selectedVoicesByModel[engineId] ?: selectedVoiceId,
+                )
+                indicTinyHindiTtsEngine.setPreferredVoice(voice)
+                if (indicTinyHindiTtsEngine.initialize()) indicTinyHindiTtsEngine else null
+            }
+            SpeechModelManager.PIPER_HI_ID,
+            SpeechModelManager.KOKORO_MULTI_ID,
+            SpeechModelManager.PIPER_EN_ID,
+            SpeechModelManager.KITTEN_EN_ID,
+            SpeechModelManager.POCKET_TTS_ID -> {
+                val voice = voiceOverride ?: selectedVoicesByModel[engineId] ?: selectedVoiceId
+                if (!speechModelManager.isModelInstalled(engineId, voice)) return null
+                if (sherpaTtsEngine.initializeFor(engineId, voice)) {
+                    selectedVoicesByModel[engineId] = sherpaTtsEngine.getConfiguredVoiceId()
+                    sherpaTtsEngine
+                } else null
+            }
+            else -> null
+        }
+    }
+
+    private suspend fun prepareFirstAvailableNeuralEngine(priorityOrder: List<String>): StreamingTtsEngine? {
+        for (candidateId in priorityOrder) {
+            val prepared = tryPrepareEngine(candidateId)
+            if (prepared != null) return prepared
+        }
+        return null
+    }
+
     private suspend fun prepareActiveTtsEngineForSession(): Boolean {
-        val wantsPhonon = when (ttsEnginePref) {
-            ENGINE_ANDROID_TTS, androidTtsEngine.name -> false
-            PhononStreamingTtsEngine.ENGINE_NAME -> !memoryPressureDegraded && phononModelManager.isCoreInstalled()
-            else -> !memoryPressureDegraded && phononModelManager.isCoreInstalled()
+        if (ttsEnginePref == ENGINE_ANDROID_TTS || ttsEnginePref == androidTtsEngine.name) {
+            val ok = androidTtsEngine.initialize()
+            if (ok) activeTtsEngine = androidTtsEngine
+            return ok
         }
 
-        if (wantsPhonon) {
-            phononTtsEngine.setPreferredVoiceId(selectedVoiceId)
-            val phononOk = phononTtsEngine.initialize()
-            if (phononOk) {
-                selectedVoiceId = phononTtsEngine.getSelectedVoiceId()
-                activeTtsEngine = phononTtsEngine
+        if (ttsEnginePref != "auto") {
+            val chosen = tryPrepareEngine(ttsEnginePref)
+            if (chosen != null) {
+                activeTtsEngine = chosen
                 return true
             }
             emitErrorEvent(
-                "WARN_PHONON_FALLBACK",
-                phononTtsEngine.getLastError() ?: "Phonon-31M could not load; using device TTS fallback.",
+                "WARN_TTS_FALLBACK",
+                "Selected speech model could not load; using device TTS fallback.",
                 true,
             )
+        } else {
+            val order = if (activeLanguagePref == "hi") AUTO_HINDI_PRIORITY else AUTO_ENGLISH_PRIORITY
+            val best = prepareFirstAvailableNeuralEngine(order)
+            if (best != null) {
+                activeTtsEngine = best
+                return true
+            }
         }
 
         val androidOk = androidTtsEngine.initialize()
@@ -1576,73 +1808,109 @@ class LiveAudioModule(
 
     private fun stopAllTtsEngines() {
         phononTtsEngine.stopCurrent()
+        mmsHindiTtsEngine.stopCurrent()
+        indicTinyHindiTtsEngine.stopCurrent()
+        sherpaTtsEngine.stopCurrent()
         androidTtsEngine.stopCurrent()
     }
 
-    private suspend fun synthesizeClauseWithFallback(clause: QueuedClause) {
-        val isDevanagari = AndroidStreamingTtsEngine.containsDevanagari(clause.text)
-        val preferAndroidForHindi =
-            activeLanguagePref == "hi" && ttsEnginePref != PhononStreamingTtsEngine.ENGINE_NAME
-        val engine = if (
-            activeTtsEngine === phononTtsEngine &&
-            (isDevanagari || preferAndroidForHindi) &&
-            androidTtsEngine.initialize()
-        ) {
-            androidTtsEngine
-        } else {
-            activeTtsEngine
+    private suspend fun resolveEngineForClause(clauseText: String): StreamingTtsEngine {
+        val isDevanagari = AndroidStreamingTtsEngine.containsDevanagari(clauseText)
+        val activeName = activeTtsEngine.name
+        val activeSpec = speechModelManager.findSpec(activeName)
+        val activeSupportsHindi = activeSpec?.supportsHindi == true
+        val activeSupportsEnglish = activeName == PhononStreamingTtsEngine.ENGINE_NAME || activeSpec?.supportsEnglish == true
+
+        if (ttsEnginePref == ENGINE_ANDROID_TTS || ttsEnginePref == androidTtsEngine.name) {
+            if (androidTtsEngine.initialize()) return androidTtsEngine
+            return activeTtsEngine
         }
+
+        if (isDevanagari || (activeLanguagePref == "hi" && ttsEnginePref == "auto")) {
+            if (activeSupportsHindi) return activeTtsEngine
+            prepareFirstAvailableNeuralEngine(AUTO_HINDI_PRIORITY)?.let { return it }
+            if (androidTtsEngine.initialize()) return androidTtsEngine
+            return activeTtsEngine
+        }
+
+        if (!isDevanagari && ttsEnginePref == "auto") {
+            if (activeSupportsEnglish) return activeTtsEngine
+            prepareFirstAvailableNeuralEngine(AUTO_ENGLISH_PRIORITY)?.let { return it }
+            if (androidTtsEngine.initialize()) return androidTtsEngine
+            return activeTtsEngine
+        }
+
+        if (!isDevanagari && !activeSupportsEnglish && hasAsciiLetters(clauseText)) {
+            prepareFirstAvailableNeuralEngine(AUTO_ENGLISH_PRIORITY)?.let { return it }
+            if (androidTtsEngine.initialize()) return androidTtsEngine
+        }
+
+        return activeTtsEngine
+    }
+
+    private fun hasAsciiLetters(text: String): Boolean {
+        for (ch in text) {
+            if (ch in 'a'..'z' || ch in 'A'..'Z') return true
+        }
+        return false
+    }
+
+    private suspend fun synthesizeClauseWithFallback(clause: QueuedClause) {
+        val engine = resolveEngineForClause(clause.text)
         val emittedAnyPcm = AtomicBoolean(false)
+        val pcmSink: (ByteArray, Int, Int) -> Boolean = { pcmBytes, sr, channels ->
+            emittedAnyPcm.set(true)
+            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                false
+            } else {
+                nativeEnqueuePcmChunk(
+                    pcmBytes,
+                    sr,
+                    channels,
+                    clause.turnEpoch,
+                    clause.clauseId,
+                    clause.charStartOffset,
+                    clause.charEndOffset,
+                )
+            }
+        }
+        val wavSink: (ByteArray) -> Boolean = { wavBytes ->
+            emittedAnyPcm.set(true)
+            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
+                false
+            } else {
+                nativeEnqueueWavClause(
+                    wavBytes,
+                    clause.turnEpoch,
+                    clause.clauseId,
+                    clause.charStartOffset,
+                    clause.charEndOffset,
+                )
+            }
+        }
+
         val ok = engine.synthesizeClauseBlocking(
             clauseText = clause.text,
             turnEpoch = clause.turnEpoch,
             clauseId = clause.clauseId,
-            onPcmChunk = { pcmBytes, sr, channels ->
-                emittedAnyPcm.set(true)
-                if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                    false
-                } else {
-                    nativeEnqueuePcmChunk(
-                        pcmBytes,
-                        sr,
-                        channels,
-                        clause.turnEpoch,
-                        clause.clauseId,
-                        clause.charStartOffset,
-                        clause.charEndOffset,
-                    )
-                }
-            },
-            onFallbackWav = { wavBytes ->
-                emittedAnyPcm.set(true)
-                if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                    false
-                } else {
-                    nativeEnqueueWavClause(
-                        wavBytes,
-                        clause.turnEpoch,
-                        clause.clauseId,
-                        clause.charStartOffset,
-                        clause.charEndOffset,
-                    )
-                }
-            },
+            onPcmChunk = pcmSink,
+            onFallbackWav = wavSink,
         )
 
         if (
             !ok &&
-            engine === phononTtsEngine &&
+            engine !== androidTtsEngine &&
             isSessionActive.get() &&
             clause.turnEpoch == activeTurnEpoch.get()
         ) {
-            Log.w(TAG, "Phonon-31M clause synthesis failed mid-turn; falling back to device TTS.")
+            Log.w(TAG, "${engine.name} clause synthesis failed mid-turn; falling back to device TTS.")
             val androidReady = androidTtsEngine.initialize()
             if (androidReady) {
                 activeTtsEngine = androidTtsEngine
                 emitTtsConfigChangedEvent()
                 emitErrorEvent(
-                    "WARN_PHONON_FALLBACK",
-                    phononTtsEngine.getLastError() ?: "Switched to device TTS fallback.",
+                    "WARN_TTS_FALLBACK",
+                    "Switched to device TTS fallback for uninterrupted voice playback.",
                     true,
                 )
                 if (!emittedAnyPcm.get()) {
@@ -1650,34 +1918,8 @@ class LiveAudioModule(
                         clauseText = clause.text,
                         turnEpoch = clause.turnEpoch,
                         clauseId = clause.clauseId,
-                        onPcmChunk = { pcmBytes, sr, channels ->
-                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                                false
-                            } else {
-                                nativeEnqueuePcmChunk(
-                                    pcmBytes,
-                                    sr,
-                                    channels,
-                                    clause.turnEpoch,
-                                    clause.clauseId,
-                                    clause.charStartOffset,
-                                    clause.charEndOffset,
-                                )
-                            }
-                        },
-                        onFallbackWav = { wavBytes ->
-                            if (!isSessionActive.get() || clause.turnEpoch != activeTurnEpoch.get()) {
-                                false
-                            } else {
-                                nativeEnqueueWavClause(
-                                    wavBytes,
-                                    clause.turnEpoch,
-                                    clause.clauseId,
-                                    clause.charStartOffset,
-                                    clause.charEndOffset,
-                                )
-                            }
-                        },
+                        onPcmChunk = pcmSink,
+                        onFallbackWav = wavSink,
                     )
                 }
             }
@@ -1706,6 +1948,54 @@ class LiveAudioModule(
                 )
             }
         }
+        val ttsModelsArray = Arguments.createArray().apply {
+            speechModelManager.getAllSpecs().forEach { spec ->
+                val installedVoices = speechModelManager.getInstalledVoices(spec.id)
+                val voicesArr = Arguments.createArray().apply {
+                    spec.voices.forEach { v ->
+                        pushMap(
+                            Arguments.createMap().apply {
+                                putString("id", v.id)
+                                putString("label", v.label)
+                                putString("description", v.description)
+                                putString("language", v.language)
+                                putBoolean("downloaded", speechModelManager.isVoiceInstalled(spec.id, v.id))
+                            },
+                        )
+                    }
+                }
+                val langsArr = Arguments.createArray().apply {
+                    spec.languages.forEach { pushString(it) }
+                }
+                val installedVoicesArr = Arguments.createArray().apply {
+                    installedVoices.forEach { pushString(it) }
+                }
+                pushMap(
+                    Arguments.createMap().apply {
+                        putString("id", spec.id)
+                        putString("label", spec.label)
+                        putString("subtitle", spec.subtitle)
+                        putString("engineFamily", spec.engineFamily)
+                        putArray("languages", langsArr)
+                        putInt("sampleRate", spec.sampleRate)
+                        putDouble("estimatedBytes", spec.estimatedBytes.toDouble())
+                        putDouble("installedBytes", speechModelManager.getInstalledBytes(spec.id).toDouble())
+                        putBoolean("installed", speechModelManager.isModelInstalled(spec.id))
+                        putBoolean("downloading", speechModelManager.isDownloading(spec.id))
+                        putInt("percent", speechModelManager.getDownloadPercent(spec.id))
+                        putBoolean("supportsHindi", spec.supportsHindi)
+                        putBoolean("supportsEnglish", spec.supportsEnglish)
+                        putString("defaultVoiceId", spec.defaultVoiceId)
+                        putArray("installedVoices", installedVoicesArr)
+                        putArray("voices", voicesArr)
+                    },
+                )
+            }
+        }
+        val activeVoiceForUi = speechModelManager.findSpec(ttsEnginePref)?.let { spec ->
+            selectedVoicesByModel[spec.id] ?: spec.defaultVoiceId
+        } ?: selectedVoiceId
+
         return Arguments.createMap().apply {
             putBoolean("hasSileroModel", vadEngine.hasBundledOrLocalModel())
             putBoolean("hasDeviceAsr", asrEngine.isAnyAsrSupported())
@@ -1721,14 +2011,16 @@ class LiveAudioModule(
             putDouble("phononDiskBytes", snapshot.downloadedBytes.toDouble())
             putString("phononVariant", snapshot.installedVariant ?: "")
             putString("selectedTtsEngine", ttsEnginePref)
-            putString("selectedVoiceId", selectedVoiceId)
+            putString("selectedVoiceId", activeVoiceForUi)
             putArray("downloadedVoices", downloadedVoicesArray)
             putArray("availableVoices", availableVoicesArray)
+            putArray("ttsModels", ttsModelsArray)
         }
     }
 
     private fun emitTtsDownloadProgressEvent(progress: PhononModelManager.DownloadProgress) {
         sendEvent(EVENT_TTS_DOWNLOAD_PROGRESS, Arguments.createMap().apply {
+            putString("modelId", PhononStreamingTtsEngine.ENGINE_NAME)
             putString("status", progress.status)
             putInt("percent", progress.percent)
             putDouble("downloadedBytes", progress.downloadedBytes.toDouble())
@@ -1736,6 +2028,19 @@ class LiveAudioModule(
             if (progress.currentFile != null) {
                 putString("currentFile", progress.currentFile)
             }
+            if (progress.error != null) {
+                putString("error", progress.error)
+            }
+        })
+    }
+
+    private fun emitSpeechDownloadProgressEvent(progress: SpeechModelManager.DownloadProgress) {
+        sendEvent(EVENT_TTS_DOWNLOAD_PROGRESS, Arguments.createMap().apply {
+            putString("modelId", progress.modelId)
+            putString("status", progress.state)
+            putInt("percent", progress.percent)
+            putDouble("downloadedBytes", progress.downloadedBytes.toDouble())
+            putDouble("totalBytes", progress.totalBytes.toDouble())
             if (progress.error != null) {
                 putString("error", progress.error)
             }

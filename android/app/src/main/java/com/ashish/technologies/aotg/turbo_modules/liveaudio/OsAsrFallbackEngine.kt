@@ -128,17 +128,25 @@ internal class OsAsrFallbackEngine(private val context: Context) {
                     override fun onEvent(eventType: Int, params: Bundle?) = Unit
                 })
 
-                val recognitionLang = when (preferredLanguage) {
+                val explicitLang: String? = when (preferredLanguage) {
                     "hi" -> "hi-IN"
                     "en" -> if (Locale.getDefault().language == "en") Locale.getDefault().toLanguageTag() else Locale.US.toLanguageTag()
-                    else -> Locale.getDefault().toLanguageTag()
+                    else -> null
                 }
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(
                         RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                         RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
                     )
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLang)
+                    if (explicitLang != null) {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, explicitLang)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
+                        putExtra(
+                            RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH,
+                            RecognizerIntent.LANGUAGE_SWITCH_BALANCED
+                        )
+                    }
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                     putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, session.readFd)
                     putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)

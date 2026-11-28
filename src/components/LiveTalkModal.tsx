@@ -30,6 +30,8 @@ import {
   LiveTalkSliceState,
   LiveTtsEnginePref,
   PhononVoiceOption,
+  SpeechModelId,
+  SpeechModelOption,
 } from '../store/slices/liveTalkSlice';
 import MicIcon from '../static/images/SVG/MicIcon';
 import LiveIcon from '../static/images/SVG/LiveIcon';
@@ -51,8 +53,11 @@ interface LiveTalkModalProps {
   onDownloadPhonon: (variant?: 'q4' | 'fp32') => void;
   onCancelPhononDownload: () => void;
   onDeletePhonon: () => void;
+  onDownloadSpeechModel?: (modelId: SpeechModelId, voiceId?: string) => void;
+  onCancelSpeechModelDownload?: (modelId: SpeechModelId) => void;
+  onDeleteSpeechModel?: (modelId: SpeechModelId) => void;
   onSelectTtsEngine: (engine: LiveTtsEnginePref) => void;
-  onSelectVoice: (voiceId: string) => void;
+  onSelectVoice: (voiceId: string, engine?: LiveTtsEnginePref) => void;
   onSelectLanguage?: (language: LiveLanguage) => void;
 }
 
@@ -234,10 +239,194 @@ const SpeakerCard = memo(
         </Text>
         <View style={styles.speakerFooter}>
           <Text style={[styles.speakerMeta, selected ? accentStyle : subStyle]}>
-            {selected ? '● ACTIVE' : voice.downloaded ? 'LOCAL READY' : '24KHZ PCM'}
+            {selected ? '● ACTIVE' : voice.downloaded ? 'LOCAL READY' : 'DOWNLOAD ON TAP'}
           </Text>
         </View>
       </Pressable>
+    );
+  }
+);
+
+interface AnimatedBarProps {
+  percent: number;
+  trackStyle: object;
+  fillStyle: object;
+}
+
+const AnimatedProgressBar = memo(({ percent, trackStyle, fillStyle }: AnimatedBarProps) => {
+  const barSV = useSharedValue(0);
+
+  useEffect(() => {
+    barSV.value = withTiming(Math.max(0, Math.min(100, percent || 0)), { duration: 150 });
+  }, [barSV, percent]);
+
+  const animStyle = useAnimatedStyle(() => ({
+    width: `${Math.round(barSV.value)}%`,
+  }), []);
+
+  return (
+    <View style={[styles.progressTrack, trackStyle]}>
+      <Reanimated.View style={[styles.progressFill, fillStyle, animStyle]} />
+    </View>
+  );
+});
+
+interface SpeechModelRowProps {
+  model: SpeechModelOption;
+  isSelected: boolean;
+  isActiveBackend: boolean;
+  errorText: string | null;
+  cardStyle: object;
+  selectedCardStyle: object;
+  pillStyle: object;
+  titleStyle: object;
+  subStyle: object;
+  accentStyle: object;
+  errorBtnStyle: object;
+  errorTextStyle: object;
+  retryBtnStyle: object;
+  progressTrackStyle: object;
+  progressFillStyle: object;
+  onSelect: (modelId: SpeechModelId) => void;
+  onDownload: (modelId: SpeechModelId, voiceId: string) => void;
+  onCancel: (modelId: SpeechModelId) => void;
+  onConfirmDelete: (modelId: SpeechModelId, label: string, bytes: number) => void;
+}
+
+const SpeechModelRow = memo(
+  ({
+    model,
+    isSelected,
+    isActiveBackend,
+    errorText,
+    cardStyle,
+    selectedCardStyle,
+    pillStyle,
+    titleStyle,
+    subStyle,
+    accentStyle,
+    errorBtnStyle,
+    errorTextStyle,
+    retryBtnStyle,
+    progressTrackStyle,
+    progressFillStyle,
+    onSelect,
+    onDownload,
+    onCancel,
+    onConfirmDelete,
+  }: SpeechModelRowProps) => {
+    const sizeBytes = model.installed && model.installedBytes > 0
+      ? model.installedBytes
+      : model.estimatedBytes;
+    const sizeLabel = formatMegabytes(sizeBytes);
+    const langTag =
+      model.supportsHindi && model.supportsEnglish
+        ? 'HI + EN'
+        : model.supportsHindi
+        ? 'HINDI'
+        : 'ENGLISH';
+    const srLabel = model.sampleRate === 22_050 ? '22 kHz' : `${Math.round(model.sampleRate / 1000)} kHz`;
+
+    const handleUse = useCallback(() => {
+      onSelect(model.id);
+    }, [model.id, onSelect]);
+
+    const handleDownload = useCallback(() => {
+      onDownload(model.id, model.defaultVoiceId);
+    }, [model.defaultVoiceId, model.id, onDownload]);
+
+    const handleCancel = useCallback(() => {
+      onCancel(model.id);
+    }, [model.id, onCancel]);
+
+    const handleDelete = useCallback(() => {
+      onConfirmDelete(model.id, model.label, sizeBytes);
+    }, [model.id, model.label, onConfirmDelete, sizeBytes]);
+
+    return (
+      <View
+        style={[
+          styles.studioTelemetryCard,
+          cardStyle,
+          isSelected || isActiveBackend ? selectedCardStyle : null,
+        ]}>
+        {model.downloading ? (
+          <View style={styles.bannerDownloadCol}>
+            <View style={styles.bannerTopRow}>
+              <View style={styles.bannerLeftCol}>
+                <Text numberOfLines={1} style={[styles.studioCardTitle, titleStyle]}>
+                  {model.label}
+                </Text>
+                <Text style={[styles.bannerSubMono, subStyle]}>
+                  Downloading · {model.percent}% · ~{sizeLabel} MB
+                </Text>
+              </View>
+              <Pressable
+                onPress={handleCancel}
+                accessibilityRole="button"
+                accessibilityLabel={`Cancel ${model.label} download`}
+                style={[styles.studioOutlineBtn, errorBtnStyle]}>
+                <Text style={[styles.studioOutlineBtnText, errorTextStyle]}>Cancel</Text>
+              </Pressable>
+            </View>
+            <AnimatedProgressBar
+              percent={model.percent}
+              trackStyle={progressTrackStyle}
+              fillStyle={progressFillStyle}
+            />
+          </View>
+        ) : (
+          <View style={styles.bannerTopRow}>
+            <Pressable
+              onPress={model.installed ? handleUse : undefined}
+              disabled={!model.installed}
+              style={styles.bannerLeftCol}>
+              <View style={styles.bannerTitleRow}>
+                {isSelected || isActiveBackend ? <View style={styles.dotEmerald} /> : null}
+                <Text numberOfLines={1} style={[styles.studioCardTitle, titleStyle]}>
+                  {model.label}
+                </Text>
+                <View style={[styles.modelLangPill, pillStyle]}>
+                  <Text style={[styles.modelLangPillText, accentStyle]}>{langTag}</Text>
+                </View>
+              </View>
+              <Text numberOfLines={2} style={[styles.bannerSub, subStyle]}>
+                {errorText || `${model.subtitle} · ${srLabel} · ${sizeLabel} MB`}
+              </Text>
+            </Pressable>
+            <View style={styles.bannerActions}>
+              {model.installed ? (
+                <>
+                  <Pressable
+                    onPress={handleUse}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isSelected }}
+                    style={[styles.studioOutlineBtn, pillStyle]}>
+                    <Text style={[styles.studioOutlineBtnText, isSelected ? accentStyle : titleStyle]}>
+                      {isSelected ? 'Selected' : isActiveBackend ? 'Auto Active' : 'Use'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={handleDelete}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${model.label}`}
+                    style={[styles.studioOutlineBtn, pillStyle]}>
+                    <Text style={[styles.studioOutlineBtnText, errorTextStyle]}>Remove</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <Pressable
+                  onPress={handleDownload}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Download ${model.label}`}
+                  style={[styles.bannerCtaBtn, retryBtnStyle]}>
+                  <Text style={styles.bannerCtaText}>{errorText ? 'Retry' : 'Download'}</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+        )}
+      </View>
     );
   }
 );
@@ -374,6 +563,9 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
     onDownloadPhonon,
     onCancelPhononDownload,
     onDeletePhonon,
+    onDownloadSpeechModel,
+    onCancelSpeechModelDownload,
+    onDeleteSpeechModel,
     onSelectTtsEngine,
     onSelectVoice,
     onSelectLanguage,
@@ -386,7 +578,6 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
 
     const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
     const pulseSV = useSharedValue(1);
-    const downloadProgressSV = useSharedValue(0);
 
     const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
     const [isRouteSheetOpen, setIsRouteSheetOpen] = useState(false);
@@ -455,17 +646,6 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
         transform: [{ scale: scaleTarget }],
       };
     }, [isListening, isMuted, isSpeaking]);
-
-    useEffect(() => {
-      const pct = Math.max(0, Math.min(100, liveTalk.phononDownload.percent || 0));
-      downloadProgressSV.value = withTiming(pct, { duration: 150 });
-    }, [downloadProgressSV, liveTalk.phononDownload.percent]);
-
-    const downloadFillAnimStyle = useAnimatedStyle(() => {
-      return {
-        width: `${Math.round(downloadProgressSV.value)}%`,
-      };
-    }, []);
 
     const dynamicStyles = useMemo(() => {
       const orbSize = isTablet ? 176 : 142;
@@ -690,18 +870,66 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
       setIsBannerDismissed(true);
     }, []);
 
-    const handleDownloadPhononPress = useCallback(() => {
-      setIsBannerDismissed(false);
-      onDownloadPhonon('q4');
-    }, [onDownloadPhonon]);
-
-    const handleSelectPhononEngine = useCallback(() => {
-      onSelectTtsEngine('phonon_31m');
+    const handleSelectAutoEngine = useCallback(() => {
+      onSelectTtsEngine('auto');
     }, [onSelectTtsEngine]);
 
     const handleSelectDeviceEngine = useCallback(() => {
       onSelectTtsEngine('android_tts');
     }, [onSelectTtsEngine]);
+
+    const handleDownloadModelPress = useCallback(
+      (modelId: SpeechModelId, voiceId: string) => {
+        setIsBannerDismissed(false);
+        if (onDownloadSpeechModel) {
+          onDownloadSpeechModel(modelId, voiceId);
+        } else if (modelId === 'phonon_31m') {
+          onDownloadPhonon('q4');
+        }
+      },
+      [onDownloadPhonon, onDownloadSpeechModel]
+    );
+
+    const handleCancelModelPress = useCallback(
+      (modelId: SpeechModelId) => {
+        if (onCancelSpeechModelDownload) {
+          onCancelSpeechModelDownload(modelId);
+        } else if (modelId === 'phonon_31m') {
+          onCancelPhononDownload();
+        }
+      },
+      [onCancelPhononDownload, onCancelSpeechModelDownload]
+    );
+
+    const handleDeleteModelConfirmed = useCallback(
+      (modelId: SpeechModelId) => {
+        if (onDeleteSpeechModel) {
+          onDeleteSpeechModel(modelId);
+        } else if (modelId === 'phonon_31m') {
+          onDeletePhonon();
+        }
+      },
+      [onDeletePhonon, onDeleteSpeechModel]
+    );
+
+    const handleConfirmDeleteModel = useCallback(
+      (modelId: SpeechModelId, label: string, bytes: number) => {
+        const mb = formatMegabytes(bytes);
+        Alert.alert(
+          `Remove ${label}?`,
+          `This frees ~${mb} MB of on-device storage.`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Remove',
+              style: 'destructive',
+              onPress: () => handleDeleteModelConfirmed(modelId),
+            },
+          ]
+        );
+      },
+      [handleDeleteModelConfirmed]
+    );
 
     const handleSelectLangAuto = useCallback(() => {
       onSelectLanguage?.('auto');
@@ -718,46 +946,126 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
     const handleCycleLanguage = useCallback(() => {
       if (!onSelectLanguage) return;
       const next: LiveLanguage =
-        liveTalk.language === 'auto' ? 'hi' : liveTalk.language === 'hi' ? 'en' : 'auto';
+        liveTalk.language === 'auto' ? 'en' : liveTalk.language === 'en' ? 'hi' : 'auto';
       onSelectLanguage(next);
     }, [liveTalk.language, onSelectLanguage]);
 
-    const handleConfirmDeletePhonon = useCallback(() => {
-      const mb = formatMegabytes(liveTalk.phononDiskBytes || liveTalk.phononExpectedBytes);
-      Alert.alert(
-        'Remove Phonon-31M Voice Model?',
-        `This frees ~${mb} MB of on-device storage and switches Live Voice Talk back to Device TTS.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Remove', style: 'destructive', onPress: onDeletePhonon },
-        ]
-      );
-    }, [liveTalk.phononDiskBytes, liveTalk.phononExpectedBytes, onDeletePhonon]);
+    const allSpeechCatalog = useMemo<SpeechModelOption[]>(() => {
+      const phononEntry: SpeechModelOption = {
+        id: 'phonon_31m',
+        label: 'Phonon-31M Neural (EN)',
+        subtitle: 'Ultra-low-latency 24 kHz CPU streaming · 8 personas',
+        engineFamily: 'phonon',
+        languages: ['en'],
+        sampleRate: 24_000,
+        estimatedBytes: liveTalk.phononExpectedBytes,
+        installedBytes: liveTalk.phononDiskBytes,
+        installed: liveTalk.phononInstalled,
+        downloading: liveTalk.phononDownloading,
+        percent: liveTalk.phononDownload.percent,
+        supportsHindi: false,
+        supportsEnglish: true,
+        defaultVoiceId: 'easton',
+        installedVoices: liveTalk.availableVoices.filter((v) => v.downloaded).map((v) => v.id),
+        voices: liveTalk.availableVoices.map((v) => ({
+          ...v,
+          language: 'en',
+        })),
+      };
+      return [...liveTalk.ttsModels, phononEntry];
+    }, [
+      liveTalk.availableVoices,
+      liveTalk.phononDiskBytes,
+      liveTalk.phononDownload.percent,
+      liveTalk.phononDownloading,
+      liveTalk.phononExpectedBytes,
+      liveTalk.phononInstalled,
+      liveTalk.ttsModels,
+    ]);
+
+    const installedNeuralCount = useMemo(
+      () => allSpeechCatalog.filter((m) => m.installed).length,
+      [allSpeechCatalog]
+    );
+    const activeDownloadingModel = useMemo(
+      () => allSpeechCatalog.find((m) => m.downloading) || null,
+      [allSpeechCatalog]
+    );
+    const activeBackendModel = useMemo(
+      () => allSpeechCatalog.find((m) => m.id === liveTalk.ttsBackend) || null,
+      [allSpeechCatalog, liveTalk.ttsBackend]
+    );
+    const inspectedModel = useMemo(() => {
+      if (liveTalk.ttsEnginePref !== 'auto' && liveTalk.ttsEnginePref !== 'android_tts') {
+        const pinned = allSpeechCatalog.find((m) => m.id === liveTalk.ttsEnginePref);
+        if (pinned) return pinned;
+      }
+      if (activeBackendModel) return activeBackendModel;
+      return allSpeechCatalog.find((m) => m.installed) || allSpeechCatalog[0];
+    }, [activeBackendModel, allSpeechCatalog, liveTalk.ttsEnginePref]);
+
+    const displayedVoices = useMemo<PhononVoiceOption[]>(() => {
+      if (!inspectedModel) return liveTalk.availableVoices;
+      return inspectedModel.voices.map((v) => ({
+        id: v.id,
+        label: v.label,
+        description: v.description,
+        downloaded: v.downloaded,
+      }));
+    }, [inspectedModel, liveTalk.availableVoices]);
+
+    const handleCancelActiveBannerDownload = useCallback(() => {
+      if (!activeDownloadingModel) return;
+      handleCancelModelPress(activeDownloadingModel.id);
+    }, [activeDownloadingModel, handleCancelModelPress]);
+
+    const handleSelectSpeechEngine = useCallback(
+      (modelId: SpeechModelId) => {
+        onSelectTtsEngine(modelId);
+      },
+      [onSelectTtsEngine]
+    );
+
+    const handleSelectVoiceForInspectedModel = useCallback(
+      (voiceId: string) => {
+        onSelectVoice(voiceId, inspectedModel?.id);
+      },
+      [inspectedModel?.id, onSelectVoice]
+    );
 
     const modeBadgeText = liveTalk.inputMode === 'audio_bytes' ? 'NATIVE AUDIO' : 'ON-DEVICE ASR';
     const routeText = getRouteLabel(liveTalk.activeRoute, liveTalk.preferredRoute);
     const statusTitle = getStateTitle(liveTalk);
-    const isUsingPhonon = liveTalk.ttsBackend === 'phonon_31m';
+    const isUsingNeural = liveTalk.ttsBackend !== 'android_tts' && activeBackendModel != null;
     const activeVoiceLabel = useMemo(() => {
-      const found = liveTalk.availableVoices.find((v) => v.id === liveTalk.selectedVoiceId);
-      return found ? found.label : 'Easton';
-    }, [liveTalk.availableVoices, liveTalk.selectedVoiceId]);
-    const voicePillLabel = liveTalk.phononDownloading
-      ? `DL ${liveTalk.phononDownload.percent}%`
-      : isUsingPhonon
-      ? `${activeVoiceLabel} • Phonon`
-      : liveTalk.phononInstalled
+      const targetVoices = activeBackendModel?.voices || displayedVoices;
+      const found = targetVoices.find((v) => v.id === liveTalk.selectedVoiceId);
+      return found ? found.label : targetVoices[0]?.label || 'Default';
+    }, [activeBackendModel, displayedVoices, liveTalk.selectedVoiceId]);
+    const voicePillLabel = activeDownloadingModel
+      ? `DL ${activeDownloadingModel.percent}%`
+      : isUsingNeural && activeBackendModel
+      ? `${activeVoiceLabel} · ${activeBackendModel.label.split(' ')[0]}`
+      : installedNeuralCount > 0
       ? 'Device TTS'
-      : 'Get Voice';
-    const expectedMbLabel = formatMegabytes(liveTalk.phononExpectedBytes);
-    const downloadedMbLabel = formatMegabytes(liveTalk.phononDownload.downloadedBytes);
-    const totalDownloadMbLabel = formatMegabytes(
-      liveTalk.phononDownload.totalBytes || liveTalk.phononExpectedBytes
+      : 'Speech Models';
+    const downloadedMbLabel = formatMegabytes(
+      activeDownloadingModel?.id === 'phonon_31m'
+        ? liveTalk.phononDownload.downloadedBytes
+        : activeDownloadingModel
+        ? liveTalk.speechDownloads[activeDownloadingModel.id]?.downloadedBytes || 0
+        : liveTalk.phononDownload.downloadedBytes
     );
-    const diskMbLabel = formatMegabytes(liveTalk.phononDiskBytes || liveTalk.phononExpectedBytes);
+    const totalDownloadMbLabel = formatMegabytes(
+      activeDownloadingModel?.id === 'phonon_31m'
+        ? liveTalk.phononDownload.totalBytes || liveTalk.phononExpectedBytes
+        : activeDownloadingModel
+        ? liveTalk.speechDownloads[activeDownloadingModel.id]?.totalBytes || activeDownloadingModel.estimatedBytes
+        : liveTalk.phononExpectedBytes
+    );
     const showQuickBanner =
-      liveTalk.phononDownloading ||
-      !liveTalk.phononInstalled ||
+      activeDownloadingModel != null ||
+      installedNeuralCount === 0 ||
       !isBannerDismissed;
     const hasStreamingCaptions =
       liveTalk.turns.length > 0 ||
@@ -797,7 +1105,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                   accessibilityRole="button"
                   accessibilityLabel="Open Voice and Neural Engine Studio"
                   style={[styles.headerActionPill, dynamicStyles.elevatedPill]}>
-                  <View style={isUsingPhonon ? styles.dotTeal : styles.dotAmber} />
+                  <View style={isUsingNeural ? styles.dotTeal : styles.dotAmber} />
                   <Text numberOfLines={1} style={[styles.headerPillText, dynamicStyles.primaryText]}>
                     {voicePillLabel}
                   </Text>
@@ -860,20 +1168,22 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
               <Text style={[styles.statusTelemetry, dynamicStyles.secondaryText]}>
                 {liveTalk.aecEnabled ? 'AEC ACTIVE' : 'VOICE CHANNEL'}
                 {liveTalk.vadBackend === 'silero_onnx' ? ' · SILERO VAD V5' : ' · ADAPTIVE VAD'}
-                {isUsingPhonon ? ` · PHONON (${activeVoiceLabel.toUpperCase()})` : ' · DEVICE TTS'}
+                {isUsingNeural && activeBackendModel
+                  ? ` · ${activeBackendModel.label.split(' ')[0].toUpperCase()} (${activeVoiceLabel.toUpperCase()})`
+                  : ' · DEVICE TTS'}
               </Text>
               {onSelectLanguage ? (
                 <Pressable
                   onPress={handleCycleLanguage}
                   accessibilityRole="button"
-                  accessibilityLabel="Switch conversation language between Auto, Hindi, and English"
+                  accessibilityLabel="Switch conversation language between Auto, English, and Hindi"
                   style={[styles.langQuickPill, dynamicStyles.elevatedPill]}>
                   <Text style={[styles.langQuickPillText, dynamicStyles.accentTealText]}>
                     {liveTalk.language === 'hi'
                       ? 'LANG: हिन्दी (HI)'
                       : liveTalk.language === 'en'
                       ? 'LANG: ENGLISH'
-                      : 'LANG: AUTO (EN / हिन्दी)'}
+                      : 'LANG: AUTO'}
                   </Text>
                 </Pressable>
               ) : null}
@@ -882,13 +1192,13 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
             {/* 3. Compact Quick Voice Banner */}
             {showQuickBanner ? (
               <View style={[styles.voiceBanner, dynamicStyles.cardSurface]}>
-                {liveTalk.phononDownloading ? (
+                {activeDownloadingModel ? (
                   <View style={styles.bannerDownloadCol}>
                     <View style={styles.bannerTopRow}>
                       <View style={styles.bannerLeftMeta}>
                         <View style={styles.dotTeal} />
-                        <Text style={[styles.bannerTitle, dynamicStyles.primaryText]}>
-                          Downloading Phonon-31M ({liveTalk.phononDownload.percent}%)
+                        <Text numberOfLines={1} style={[styles.bannerTitle, dynamicStyles.primaryText]}>
+                          Downloading {activeDownloadingModel.label} ({activeDownloadingModel.percent}%)
                         </Text>
                       </View>
                       <View style={styles.bannerActions}>
@@ -901,7 +1211,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                           </Text>
                         </Pressable>
                         <Pressable
-                          onPress={onCancelPhononDownload}
+                          onPress={handleCancelActiveBannerDownload}
                           accessibilityRole="button"
                           style={[styles.bannerSmallBtn, dynamicStyles.elevatedPill]}>
                           <Text style={[styles.bannerSmallBtnText, dynamicStyles.errorText]}>
@@ -912,37 +1222,32 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     </View>
                     <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
                       {downloadedMbLabel} / {totalDownloadMbLabel} MB
-                      {liveTalk.phononDownload.currentFile ? ` · ${liveTalk.phononDownload.currentFile}` : ''}
                     </Text>
-                    <View style={[styles.progressTrack, dynamicStyles.progressTrackSurface]}>
-                      <Reanimated.View
-                        style={[styles.progressFill, dynamicStyles.progressFillSurface, downloadFillAnimStyle]}
-                      />
-                    </View>
+                    <AnimatedProgressBar
+                      percent={activeDownloadingModel.percent}
+                      trackStyle={dynamicStyles.progressTrackSurface}
+                      fillStyle={dynamicStyles.progressFillSurface}
+                    />
                   </View>
-                ) : !liveTalk.phononInstalled ? (
+                ) : installedNeuralCount === 0 ? (
                   <View style={styles.bannerTopRow}>
                     <Pressable onPress={handleOpenVoiceStudio} style={styles.bannerLeftCol}>
                       <View style={styles.bannerTitleRow}>
                         <View style={styles.dotEmerald} />
                         <Text style={[styles.bannerTitle, dynamicStyles.primaryText]}>
-                          Phonon-31M Neural Voice (~{expectedMbLabel} MB)
+                          Offline Neural Voices (Hindi & English)
                         </Text>
                       </View>
                       <Text numberOfLines={1} style={[styles.bannerSub, dynamicStyles.secondaryText]}>
-                        {liveTalk.phononDownload.status === 'error' && liveTalk.phononDownload.error
-                          ? liveTalk.phononDownload.error
-                          : 'On-demand 24kHz CPU TTS with 8 local personas'}
+                        Download MMS-TTS Hindi, Indic-Tiny, Piper, Kokoro, or Phonon-31M
                       </Text>
                     </Pressable>
                     <Pressable
-                      onPress={handleDownloadPhononPress}
+                      onPress={handleOpenVoiceStudio}
                       accessibilityRole="button"
-                      accessibilityLabel="Download Phonon-31M neural voice"
+                      accessibilityLabel="Choose and download speech model"
                       style={[styles.bannerCtaBtn, dynamicStyles.retryBtn]}>
-                      <Text style={styles.bannerCtaText}>
-                        {liveTalk.phononDownload.status === 'error' ? 'Retry' : 'Download'}
-                      </Text>
+                      <Text style={styles.bannerCtaText}>Models</Text>
                     </Pressable>
                   </View>
                 ) : (
@@ -950,9 +1255,9 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     <Pressable onPress={handleOpenVoiceStudio} style={styles.bannerLeftMeta}>
                       <View style={styles.dotEmerald} />
                       <Text numberOfLines={1} style={[styles.bannerTitle, dynamicStyles.primaryText]}>
-                        {isUsingPhonon
-                          ? `Phonon Neural Ready · ${activeVoiceLabel}`
-                          : 'Device TTS Active · Switch to Phonon'}
+                        {isUsingNeural && activeBackendModel
+                          ? `${activeBackendModel.label} · ${activeVoiceLabel}`
+                          : 'Device TTS Active · Neural Models Ready'}
                       </Text>
                     </Pressable>
                     <View style={styles.bannerActions}>
@@ -961,7 +1266,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                         accessibilityRole="button"
                         style={[styles.bannerSmallBtn, dynamicStyles.elevatedPill]}>
                         <Text style={[styles.bannerSmallBtnText, dynamicStyles.accentTealText]}>
-                          Voices
+                          Models
                         </Text>
                       </Pressable>
                       <Pressable
@@ -1129,14 +1434,14 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                     </Text>
                   </View>
                   <Text style={[styles.sheetSubtitle, dynamicStyles.secondaryText]}>
-                    LOCAL ON-DEVICE PHONON PIPELINE
+                    ON-DEVICE MULTILINGUAL SPEECH STUDIO
                   </Text>
                 </View>
 
                 <View style={styles.sheetHeaderRight}>
                   <View style={[styles.storageBadge, dynamicStyles.elevatedPill]}>
                     <Text style={[styles.storageBadgeText, dynamicStyles.accentTealText]}>
-                      {liveTalk.phononInstalled ? `${diskMbLabel} MB` : `${expectedMbLabel} MB`}
+                      {installedNeuralCount}/{allSpeechCatalog.length} READY
                     </Text>
                   </View>
                   <Pressable
@@ -1223,12 +1528,15 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                   </>
                 ) : null}
 
-                {/* Engine Segmented Selector */}
+                {/* Routing Mode Strip */}
+                <Text style={[styles.personaSectionTitle, dynamicStyles.secondaryText]}>
+                  SPEECH ROUTING MODE
+                </Text>
                 <View style={[styles.engineSegmentTrack, dynamicStyles.segmentTrack]}>
                   <Pressable
-                    onPress={handleSelectPhononEngine}
+                    onPress={handleSelectAutoEngine}
                     accessibilityRole="button"
-                    accessibilityLabel="Select Phonon-31M Neural TTS"
+                    accessibilityLabel="Select Auto Smart Bilingual Speech Routing"
                     style={[
                       styles.engineSegmentBtn,
                       liveTalk.ttsEnginePref !== 'android_tts'
@@ -1242,7 +1550,9 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                           ? dynamicStyles.primaryText
                           : dynamicStyles.secondaryText,
                       ]}>
-                      Phonon-31M Neural
+                      {liveTalk.ttsEnginePref === 'auto'
+                        ? 'Auto Bilingual'
+                        : inspectedModel?.label.split(' ')[0] || 'Neural Active'}
                     </Text>
                   </Pressable>
                   <Pressable
@@ -1267,97 +1577,73 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                   </Pressable>
                 </View>
 
-                {/* Model Download / Checkpoint Status Card */}
-                <View style={[styles.studioTelemetryCard, dynamicStyles.cardSurface]}>
-                  {liveTalk.phononDownloading ? (
-                    <View style={styles.bannerDownloadCol}>
-                      <View style={styles.bannerTopRow}>
-                        <View style={styles.bannerLeftCol}>
-                          <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
-                            Phonon Acoustic Checkpoint (Q4)
-                          </Text>
-                          <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
-                            {downloadedMbLabel} / {totalDownloadMbLabel} MB ({liveTalk.phononDownload.percent}%)
-                          </Text>
-                        </View>
-                        <Pressable
-                          onPress={onCancelPhononDownload}
-                          accessibilityRole="button"
-                          style={[styles.studioOutlineBtn, dynamicStyles.errorBox]}>
-                          <Text style={[styles.studioOutlineBtnText, dynamicStyles.errorText]}>
-                            Cancel
-                          </Text>
-                        </Pressable>
-                      </View>
-                      <View style={[styles.progressTrack, dynamicStyles.progressTrackSurface]}>
-                        <Reanimated.View
-                          style={[styles.progressFill, dynamicStyles.progressFillSurface, downloadFillAnimStyle]}
-                        />
-                      </View>
-                    </View>
-                  ) : liveTalk.phononInstalled ? (
-                    <View style={styles.bannerTopRow}>
-                      <View style={styles.bannerLeftCol}>
-                        <View style={styles.bannerTitleRow}>
-                          <View style={styles.dotEmerald} />
-                          <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
-                            Phonon-31M {liveTalk.phononVariant ? liveTalk.phononVariant.toUpperCase() : 'Q4'} Installed
-                          </Text>
-                        </View>
-                        <Text style={[styles.bannerSubMono, dynamicStyles.secondaryText]}>
-                          24kHz CPU Streaming · {diskMbLabel} MB Local
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={handleConfirmDeletePhonon}
-                        accessibilityRole="button"
-                        accessibilityLabel="Remove Phonon model weights"
-                        style={[styles.studioOutlineBtn, dynamicStyles.elevatedPill]}>
-                        <Text style={[styles.studioOutlineBtnText, dynamicStyles.errorText]}>
-                          Remove
-                        </Text>
-                      </Pressable>
-                    </View>
-                  ) : (
-                    <View style={styles.bannerTopRow}>
-                      <View style={styles.bannerLeftCol}>
-                        <Text style={[styles.studioCardTitle, dynamicStyles.primaryText]}>
-                          Phonon Acoustic Checkpoint (Q4)
-                        </Text>
-                        <Text style={[styles.bannerSub, dynamicStyles.secondaryText]}>
-                          {liveTalk.phononDownload.status === 'error' && liveTalk.phononDownload.error
-                            ? liveTalk.phononDownload.error
-                            : `~${expectedMbLabel} MB download • Zero-egress CPU synthesis`}
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={handleDownloadPhononPress}
-                        accessibilityRole="button"
-                        style={[styles.bannerCtaBtn, dynamicStyles.retryBtn]}>
-                        <Text style={styles.bannerCtaText}>
-                          {liveTalk.phononDownload.status === 'error' ? 'Retry' : 'Download'}
-                        </Text>
-                      </Pressable>
-                    </View>
-                  )}
+                {/* Downloadable & Selectable Neural Speech Models */}
+                <View style={styles.personaSectionHeader}>
+                  <Text style={[styles.personaSectionTitle, dynamicStyles.secondaryText]}>
+                    NEURAL SPEECH MODELS (DOWNLOAD & SELECT)
+                  </Text>
+                  <View style={[styles.presetCountBadge, dynamicStyles.elevatedPill]}>
+                    <Text style={[styles.presetCountText, dynamicStyles.secondaryText]}>
+                      {allSpeechCatalog.length} MODELS
+                    </Text>
+                  </View>
                 </View>
+
+                {allSpeechCatalog.map((model) => {
+                  const errMsg =
+                    model.id === 'phonon_31m'
+                      ? liveTalk.phononDownload.status === 'error'
+                        ? liveTalk.phononDownload.error
+                        : null
+                      : liveTalk.speechDownloads[model.id]?.status === 'error'
+                      ? liveTalk.speechDownloads[model.id]?.error || null
+                      : null;
+                  return (
+                    <SpeechModelRow
+                      key={model.id}
+                      model={model}
+                      isSelected={liveTalk.ttsEnginePref === model.id}
+                      isActiveBackend={
+                        liveTalk.ttsEnginePref === 'auto' && liveTalk.ttsBackend === model.id
+                      }
+                      errorText={errMsg}
+                      cardStyle={dynamicStyles.cardSurface}
+                      selectedCardStyle={dynamicStyles.speakerCardSelected}
+                      pillStyle={dynamicStyles.elevatedPill}
+                      titleStyle={dynamicStyles.primaryText}
+                      subStyle={dynamicStyles.secondaryText}
+                      accentStyle={dynamicStyles.accentEmeraldText}
+                      errorBtnStyle={dynamicStyles.errorBox}
+                      errorTextStyle={dynamicStyles.errorText}
+                      retryBtnStyle={dynamicStyles.retryBtn}
+                      progressTrackStyle={dynamicStyles.progressTrackSurface}
+                      progressFillStyle={dynamicStyles.progressFillSurface}
+                      onSelect={handleSelectSpeechEngine}
+                      onDownload={handleDownloadModelPress}
+                      onCancel={handleCancelModelPress}
+                      onConfirmDelete={handleConfirmDeleteModel}
+                    />
+                  );
+                })}
 
                 {/* 2-Column Speaker Persona Grid */}
                 <View style={styles.personaSectionHeader}>
                   <Text style={[styles.personaSectionTitle, dynamicStyles.secondaryText]}>
-                    ACTIVE ACOUSTIC PERSONA
+                    {inspectedModel
+                      ? `VOICES · ${inspectedModel.label.toUpperCase()}`
+                      : 'ACTIVE ACOUSTIC PERSONA'}
                   </Text>
                   <View style={[styles.presetCountBadge, dynamicStyles.elevatedPill]}>
                     <Text style={[styles.presetCountText, dynamicStyles.secondaryText]}>
-                      {liveTalk.availableVoices.length} PRESETS
+                      {displayedVoices.length} PRESETS
                     </Text>
                   </View>
                 </View>
 
                 <View style={styles.speakerGrid}>
-                  {liveTalk.availableVoices.map((voice) => (
+                  {displayedVoices.map((voice) => (
                     <SpeakerCard
-                      key={voice.id}
+                      key={`${inspectedModel?.id || 'default'}_${voice.id}`}
                       voice={voice}
                       selected={liveTalk.selectedVoiceId === voice.id}
                       isTablet={isTablet}
@@ -1368,7 +1654,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
                       titleStyle={dynamicStyles.primaryText}
                       subStyle={dynamicStyles.secondaryText}
                       accentStyle={dynamicStyles.accentEmeraldText}
-                      onSelect={onSelectVoice}
+                      onSelect={handleSelectVoiceForInspectedModel}
                     />
                   ))}
                 </View>
@@ -1980,6 +2266,17 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 6,
     borderWidth: 1,
+  },
+  modelLangPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  modelLangPillText: {
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.4,
   },
   presetCountText: {
     fontSize: 10,

@@ -1,4 +1,13 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import {
+  isValidTtsEnginePref,
+  LiveTtsEnginePref,
+  SPEECH_MODEL_IDS,
+  SpeechModelId,
+} from '../../utils/speechModels';
+
+export type { LiveTtsEnginePref, SpeechModelId };
+export { isValidTtsEnginePref, SPEECH_MODEL_IDS };
 
 export type LiveTalkState =
   | 'IDLE'
@@ -10,16 +19,58 @@ export type LiveTalkState =
 export type LiveInputMode = 'audio_bytes' | 'os_asr';
 export type LiveVadBackend = 'silero_onnx' | 'dsp_fallback';
 export type LiveOutputRoute = 'auto' | 'speaker' | 'earpiece' | 'bluetooth' | 'wired';
-export type LiveTtsEnginePref = 'auto' | 'phonon_31m' | 'android_tts';
-export type LiveTtsBackend = 'phonon_31m' | 'android_tts';
+export type LiveTtsBackend = SpeechModelId | 'android_tts';
 export type LiveLanguage = 'auto' | 'en' | 'hi';
-export type PhononDownloadStatus = 'idle' | 'downloading' | 'ready' | 'cancelled' | 'error';
+export type PhononDownloadStatus =
+  | 'idle'
+  | 'downloading'
+  | 'extracting'
+  | 'ready'
+  | 'completed'
+  | 'cancelled'
+  | 'error';
 
 export interface PhononVoiceOption {
   id: string;
   label: string;
   description: string;
   downloaded: boolean;
+}
+
+export interface SpeechModelVoiceOption {
+  id: string;
+  label: string;
+  description: string;
+  language: string;
+  downloaded: boolean;
+}
+
+export interface SpeechModelOption {
+  id: SpeechModelId;
+  label: string;
+  subtitle: string;
+  engineFamily: string;
+  languages: string[];
+  sampleRate: number;
+  estimatedBytes: number;
+  installedBytes: number;
+  installed: boolean;
+  downloading: boolean;
+  percent: number;
+  supportsHindi: boolean;
+  supportsEnglish: boolean;
+  defaultVoiceId: string;
+  installedVoices: string[];
+  voices: SpeechModelVoiceOption[];
+}
+
+export interface SpeechDownloadState {
+  modelId: string;
+  status: PhononDownloadStatus;
+  percent: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  error: string | null;
 }
 
 export interface PhononDownloadState {
@@ -30,6 +81,174 @@ export interface PhononDownloadState {
   currentFile: string | null;
   error: string | null;
 }
+
+export const DEFAULT_SPEECH_MODELS: SpeechModelOption[] = [
+  {
+    id: 'mms_tts_hin',
+    label: 'Xenova MMS-TTS Hindi',
+    subtitle: 'Meta VITS INT8 · Fast pure-Devanagari Hindi (16 kHz)',
+    engineFamily: 'onnx_vits',
+    languages: ['hi'],
+    sampleRate: 16_000,
+    estimatedBytes: 38_371_388,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: true,
+    supportsEnglish: false,
+    defaultVoiceId: 'default',
+    installedVoices: [],
+    voices: [
+      {
+        id: 'default',
+        label: 'MMS Hindi',
+        description: 'Natural native Hindi speaker',
+        language: 'hi',
+        downloaded: false,
+      },
+    ],
+  },
+  {
+    id: 'indic_tiny_hi',
+    label: 'Indic-Tiny-TTS Hindi',
+    subtitle: 'Matcha + Vocos 24 kHz studio Hindi (Female & Male)',
+    engineFamily: 'onnx_matcha',
+    languages: ['hi'],
+    sampleRate: 24_000,
+    estimatedBytes: 91_021_687,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: true,
+    supportsEnglish: false,
+    defaultVoiceId: 'female',
+    installedVoices: [],
+    voices: [
+      { id: 'female', label: 'Hindi Female', description: 'Expressive studio female', language: 'hi', downloaded: false },
+      { id: 'male', label: 'Hindi Male', description: 'Warm clear male', language: 'hi', downloaded: false },
+    ],
+  },
+  {
+    id: 'piper_hi',
+    label: 'Piper Hindi (VITS INT8)',
+    subtitle: 'Ultra-fast ~21 MB Hindi voices with eSpeak phonemizer',
+    engineFamily: 'sherpa_vits',
+    languages: ['hi'],
+    sampleRate: 22_050,
+    estimatedBytes: 21_064_499,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: true,
+    supportsEnglish: false,
+    defaultVoiceId: 'rohan',
+    installedVoices: [],
+    voices: [
+      { id: 'rohan', label: 'Rohan (Medium)', description: 'Clear conversational male', language: 'hi', downloaded: false },
+      { id: 'pratham', label: 'Pratham (Medium)', description: 'Deep balanced Hindi male', language: 'hi', downloaded: false },
+      { id: 'priyamvada', label: 'Priyamvada (Medium)', description: 'Natural expressive female', language: 'hi', downloaded: false },
+    ],
+  },
+  {
+    id: 'kokoro_multi',
+    label: 'Kokoro-82M Multi-Lang INT8',
+    subtitle: 'Bilingual English + Hindi 24 kHz studio neural voices',
+    engineFamily: 'sherpa_kokoro',
+    languages: ['hi', 'en'],
+    sampleRate: 24_000,
+    estimatedBytes: 132_353_410,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: true,
+    supportsEnglish: true,
+    defaultVoiceId: 'af_heart',
+    installedVoices: [],
+    voices: [
+      { id: 'hf_alpha', label: 'Alpha (Hindi F)', description: 'Natural Hindi female', language: 'hi', downloaded: false },
+      { id: 'hf_beta', label: 'Beta (Hindi F)', description: 'Soft Hindi female', language: 'hi', downloaded: false },
+      { id: 'hm_omega', label: 'Omega (Hindi M)', description: 'Warm Hindi male', language: 'hi', downloaded: false },
+      { id: 'hm_psi', label: 'Psi (Hindi M)', description: 'Clear Hindi male', language: 'hi', downloaded: false },
+      { id: 'af_heart', label: 'Heart (EN F)', description: 'Expressive US female', language: 'en', downloaded: false },
+      { id: 'af_bella', label: 'Bella (EN F)', description: 'Warm US female', language: 'en', downloaded: false },
+      { id: 'am_adam', label: 'Adam (EN M)', description: 'Crisp US male', language: 'en', downloaded: false },
+      { id: 'bf_emma', label: 'Emma (EN UK F)', description: 'Clear British female', language: 'en', downloaded: false },
+      { id: 'bm_george', label: 'George (EN UK M)', description: 'Steady British male', language: 'en', downloaded: false },
+    ],
+  },
+  {
+    id: 'piper_en',
+    label: 'Piper English (VITS INT8)',
+    subtitle: 'Ultra-fast ~21 MB US English voices for low-RAM devices',
+    engineFamily: 'sherpa_vits',
+    languages: ['en'],
+    sampleRate: 22_050,
+    estimatedBytes: 20_969_179,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: false,
+    supportsEnglish: true,
+    defaultVoiceId: 'lessac',
+    installedVoices: [],
+    voices: [
+      { id: 'lessac', label: 'Lessac (US Medium)', description: 'Articulate balanced neutral', language: 'en', downloaded: false },
+      { id: 'amy', label: 'Amy (US Medium)', description: 'Warm conversational US female', language: 'en', downloaded: false },
+    ],
+  },
+  {
+    id: 'kitten_en',
+    label: 'KittenTTS Nano v0.8 INT8',
+    subtitle: 'Tiny 31 MB 8-voice expressive English generator',
+    engineFamily: 'sherpa_kitten',
+    languages: ['en'],
+    sampleRate: 24_000,
+    estimatedBytes: 31_220_690,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: false,
+    supportsEnglish: true,
+    defaultVoiceId: 'jasper',
+    installedVoices: [],
+    voices: [
+      { id: 'bella', label: 'Bella', description: 'Warm expressive female', language: 'en', downloaded: false },
+      { id: 'jasper', label: 'Jasper', description: 'Balanced studio male', language: 'en', downloaded: false },
+      { id: 'luna', label: 'Luna', description: 'Soft gentle female', language: 'en', downloaded: false },
+      { id: 'bruno', label: 'Bruno', description: 'Deep steady male', language: 'en', downloaded: false },
+      { id: 'rosie', label: 'Rosie', description: 'Upbeat friendly female', language: 'en', downloaded: false },
+      { id: 'hugo', label: 'Hugo', description: 'Crisp narrator male', language: 'en', downloaded: false },
+      { id: 'kiki', label: 'Kiki', description: 'Bright energetic female', language: 'en', downloaded: false },
+      { id: 'leo', label: 'Leo', description: 'Conversational male', language: 'en', downloaded: false },
+    ],
+  },
+  {
+    id: 'pocket_tts',
+    label: 'PocketTTS INT8 (Kyutai)',
+    subtitle: 'High-fidelity zero-shot voice-conditioned English (24 kHz)',
+    engineFamily: 'sherpa_pocket',
+    languages: ['en'],
+    sampleRate: 24_000,
+    estimatedBytes: 98_337_865,
+    installedBytes: 0,
+    installed: false,
+    downloading: false,
+    percent: 0,
+    supportsHindi: false,
+    supportsEnglish: true,
+    defaultVoiceId: 'default',
+    installedVoices: [],
+    voices: [
+      { id: 'default', label: 'Pocket Studio', description: 'Default zero-shot reference voice', language: 'en', downloaded: false },
+    ],
+  },
+];
 
 export const DEFAULT_PHONON_VOICES: PhononVoiceOption[] = [
   { id: 'easton', label: 'Easton', description: 'Warm & clear', downloaded: false },
@@ -77,6 +296,8 @@ export interface LiveTalkSliceState {
   phononVariant: string;
   availableVoices: PhononVoiceOption[];
   phononDownload: PhononDownloadState;
+  ttsModels: SpeechModelOption[];
+  speechDownloads: Record<string, SpeechDownloadState>;
 }
 
 const MAX_DISPLAY_TURNS = 24;
@@ -116,6 +337,8 @@ const initialState: LiveTalkSliceState = {
     currentFile: null,
     error: null,
   },
+  ttsModels: DEFAULT_SPEECH_MODELS,
+  speechDownloads: {},
 };
 
 const liveTalkSlice = createSlice({
@@ -268,11 +491,15 @@ const liveTalkSlice = createSlice({
       }>
     ) {
       if (action.payload.ttsEnginePref) {
-        state.ttsEnginePref = action.payload.ttsEnginePref;
-        if (action.payload.ttsEnginePref === 'android_tts') {
+        const pref = action.payload.ttsEnginePref;
+        state.ttsEnginePref = pref;
+        if (pref === 'android_tts') {
           state.ttsBackend = 'android_tts';
-        } else if (state.phononInstalled) {
-          state.ttsBackend = 'phonon_31m';
+        } else if (pref !== 'auto') {
+          const model = state.ttsModels.find((m) => m.id === pref);
+          if ((pref === 'phonon_31m' && state.phononInstalled) || model?.installed) {
+            state.ttsBackend = pref;
+          }
         }
       }
       if (action.payload.selectedVoiceId) {
@@ -290,6 +517,7 @@ const liveTalkSlice = createSlice({
         selectedTtsEngine: string;
         selectedVoiceId: string;
         availableVoices?: PhononVoiceOption[];
+        ttsModels?: Array<Omit<SpeechModelOption, 'id'> & { id: string }>;
       }>
     ) {
       const p = action.payload;
@@ -300,11 +528,7 @@ const liveTalkSlice = createSlice({
       }
       state.phononDiskBytes = p.phononDiskBytes;
       state.phononVariant = p.phononVariant || '';
-      if (
-        p.selectedTtsEngine === 'auto' ||
-        p.selectedTtsEngine === 'phonon_31m' ||
-        p.selectedTtsEngine === 'android_tts'
-      ) {
+      if (isValidTtsEnginePref(p.selectedTtsEngine)) {
         state.ttsEnginePref = p.selectedTtsEngine;
       }
       if (p.selectedVoiceId) {
@@ -313,10 +537,34 @@ const liveTalkSlice = createSlice({
       if (p.availableVoices && p.availableVoices.length > 0) {
         state.availableVoices = p.availableVoices;
       }
-      state.ttsBackend =
-        p.phononInstalled && state.ttsEnginePref !== 'android_tts'
+      if (p.ttsModels && p.ttsModels.length > 0) {
+        const validModels = p.ttsModels.filter(
+          (m): m is SpeechModelOption =>
+            isValidTtsEnginePref(m.id) && m.id !== 'auto' && m.id !== 'android_tts'
+        );
+        if (validModels.length > 0) {
+          state.ttsModels = validModels;
+        }
+      }
+
+      if (state.ttsEnginePref === 'android_tts') {
+        state.ttsBackend = 'android_tts';
+      } else if (state.ttsEnginePref === 'auto') {
+        const firstInstalledSpeech = state.ttsModels.find((m) => m.installed);
+        state.ttsBackend = p.phononInstalled
           ? 'phonon_31m'
+          : firstInstalledSpeech
+          ? firstInstalledSpeech.id
           : 'android_tts';
+      } else {
+        const chosenModel = state.ttsModels.find((m) => m.id === state.ttsEnginePref);
+        if (state.ttsEnginePref === 'phonon_31m') {
+          state.ttsBackend = p.phononInstalled ? 'phonon_31m' : 'android_tts';
+        } else {
+          state.ttsBackend = chosenModel?.installed ? chosenModel.id : 'android_tts';
+        }
+      }
+
       if (p.phononInstalled && !p.phononDownloading) {
         state.phononDownload.status = 'ready';
         state.phononDownload.percent = 100;
@@ -339,20 +587,59 @@ const liveTalkSlice = createSlice({
       }>
     ) {
       const p = action.payload;
-      state.phononDownloading = p.status === 'downloading';
+      const normalizedStatus: PhononDownloadStatus = p.status === 'completed' ? 'ready' : p.status;
+      state.phononDownloading = normalizedStatus === 'downloading' || normalizedStatus === 'extracting';
       state.phononDownload = {
-        status: p.status,
+        status: normalizedStatus,
         percent: p.percent,
         downloadedBytes: p.downloadedBytes,
         totalBytes: p.totalBytes > 0 ? p.totalBytes : state.phononExpectedBytes,
         currentFile: p.currentFile ?? null,
         error: p.error ?? null,
       };
-      if (p.status === 'ready') {
+      if (normalizedStatus === 'ready') {
         state.phononInstalled = true;
         state.phononDownloading = false;
         if (state.ttsEnginePref !== 'android_tts') {
           state.ttsBackend = 'phonon_31m';
+        }
+      }
+    },
+    setSpeechModelDownloadProgress(
+      state,
+      action: PayloadAction<{
+        modelId: string;
+        status: PhononDownloadStatus;
+        percent: number;
+        downloadedBytes: number;
+        totalBytes: number;
+        error?: string | null;
+      }>
+    ) {
+      const p = action.payload;
+      const normalizedStatus: PhononDownloadStatus = p.status === 'completed' ? 'ready' : p.status;
+      const active = normalizedStatus === 'downloading' || normalizedStatus === 'extracting';
+      state.speechDownloads[p.modelId] = {
+        modelId: p.modelId,
+        status: normalizedStatus,
+        percent: p.percent,
+        downloadedBytes: p.downloadedBytes,
+        totalBytes: p.totalBytes,
+        error: p.error ?? null,
+      };
+      const target = state.ttsModels.find((m) => m.id === p.modelId);
+      if (target) {
+        target.downloading = active;
+        target.percent = p.percent;
+        if (normalizedStatus === 'ready') {
+          target.installed = true;
+          target.installedBytes = p.totalBytes > 0 ? p.totalBytes : target.estimatedBytes;
+          if (state.ttsEnginePref === p.modelId || state.ttsEnginePref === 'auto') {
+            state.ttsBackend = target.id;
+          }
+        } else if (normalizedStatus === 'idle' && p.downloadedBytes === 0) {
+          target.installed = false;
+          target.installedBytes = 0;
         }
       }
     },
@@ -377,6 +664,7 @@ export const {
   setTtsPreference,
   applyTtsCapabilities,
   setPhononDownloadProgress,
+  setSpeechModelDownloadProgress,
 } = liveTalkSlice.actions;
 
 export default liveTalkSlice.reducer;

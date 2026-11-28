@@ -106,6 +106,12 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            pickFirsts += ["**/libonnxruntime.so"]
+        }
+    }
+
     // Shorten CMake intermediate build path to avoid Windows 260-char MAX_PATH
     // limit with deeply nested codegen paths (e.g. react-native-gesture-handler).
     externalNativeBuild {
@@ -127,9 +133,11 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.17.0")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.20.0")
     implementation("com.google.oboe:oboe:1.10.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    implementation(files("libs/sherpa-onnx-static-link-onnxruntime-2.0.3.aar"))
+    implementation("org.apache.commons:commons-compress:1.26.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")

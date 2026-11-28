@@ -54,10 +54,14 @@ jest.mock('../../native/turbo_modules/LiveAudio/NativeLiveAudio', () => ({
       selectedVoiceId: 'easton',
       downloadedVoices: [],
       availableVoices: [],
+      ttsModels: [],
     }),
     downloadPhononModel: jest.fn().mockResolvedValue(true),
     cancelPhononDownload: jest.fn().mockResolvedValue(true),
     deletePhononModel: jest.fn().mockResolvedValue(true),
+    downloadTtsModel: jest.fn().mockResolvedValue(true),
+    cancelTtsModelDownload: jest.fn().mockResolvedValue(true),
+    deleteTtsModel: jest.fn().mockResolvedValue(true),
     setLanguage: jest.fn().mockImplementation(async (lang: string) => lang),
     setTtsConfig: jest.fn().mockResolvedValue({
       hasSileroModel: false,
@@ -77,6 +81,7 @@ jest.mock('../../native/turbo_modules/LiveAudio/NativeLiveAudio', () => ({
       selectedVoiceId: 'juniper',
       downloadedVoices: ['juniper'],
       availableVoices: [],
+      ttsModels: [],
     }),
     addListener: jest.fn(),
     removeListeners: jest.fn(),
@@ -341,5 +346,34 @@ describe('Phase 1 Live Talk & LLM Service Contracts', () => {
     await expect(liveAudioService.loadLanguagePreference()).resolves.toBe('hi');
     await expect(liveAudioService.setLanguage('hi')).resolves.toBe('hi');
     expect(NativeLiveAudio?.setLanguage).toHaveBeenCalledWith('hi');
+  });
+
+  it('persists and forwards multi-model TTS selection and download lifecycle methods', async () => {
+    await liveAudioService.saveTtsPreferences({
+      ttsEngine: 'mms_tts_hin',
+      voiceId: 'default',
+    });
+    await expect(liveAudioService.loadTtsPreferences()).resolves.toEqual({
+      ttsEngine: 'mms_tts_hin',
+      voiceId: 'default',
+    });
+
+    await liveAudioService.saveTtsPreferences({
+      ttsEngine: 'kokoro_multi',
+      voiceId: 'hf_alpha',
+    });
+    await expect(liveAudioService.loadTtsPreferences()).resolves.toEqual({
+      ttsEngine: 'kokoro_multi',
+      voiceId: 'hf_alpha',
+    });
+
+    await expect(liveAudioService.downloadTtsModel('indic_tiny_hi', 'male')).resolves.toBe(true);
+    expect(NativeLiveAudio?.downloadTtsModel).toHaveBeenCalledWith('indic_tiny_hi', 'male');
+
+    await expect(liveAudioService.cancelTtsModelDownload('indic_tiny_hi')).resolves.toBe(true);
+    expect(NativeLiveAudio?.cancelTtsModelDownload).toHaveBeenCalledWith('indic_tiny_hi');
+
+    await expect(liveAudioService.deleteTtsModel('indic_tiny_hi')).resolves.toBe(true);
+    expect(NativeLiveAudio?.deleteTtsModel).toHaveBeenCalledWith('indic_tiny_hi');
   });
 });
