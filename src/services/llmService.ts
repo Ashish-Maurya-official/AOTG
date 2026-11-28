@@ -55,6 +55,15 @@ export type BackendType = 'AUTO' | 'NPU' | 'GPU' | 'CPU';
 
 class LLMServiceImpl {
   private eventEmitter: NativeEventEmitter | null = null;
+  private requestSequence = 0;
+
+  public async claimAgentSession(taskId: string): Promise<boolean> {
+    return NativeLLM.claimAgentSession(taskId);
+  }
+
+  public async releaseAgentSession(taskId: string): Promise<boolean> {
+    return NativeLLM.releaseAgentSession(taskId);
+  }
 
   constructor() {
     if (Platform.OS === 'android') {
@@ -265,8 +274,11 @@ class LLMServiceImpl {
     prompt: string,
     onToken?: (event: TokenEvent) => void,
     onComplete?: (event: GenerationCompleteEvent) => void,
-    onError?: (event: GenerationErrorEvent) => void
+    onError?: (event: GenerationErrorEvent) => void,
+    ownerId: string = '',
   ): Promise<() => void> {
+    if (!this.eventEmitter) throw new Error('Local inference is unavailable');
+    const requestId = `${Date.now()}-${++this.requestSequence}`;
     const subscriptions: { remove: () => void }[] = [];
     // Guard against double-firing if an event arrives twice in edge cases.
     let settled = false;
@@ -275,6 +287,7 @@ class LLMServiceImpl {
       if (onToken) {
         subscriptions.push(
           this.eventEmitter.addListener('onToken', (data: any) => {
+            if (data.requestId !== requestId || settled) return;
             onToken(data as TokenEvent);
           })
         );
@@ -285,8 +298,9 @@ class LLMServiceImpl {
           this.eventEmitter.addListener(
             'onGenerationComplete',
             (data: any) => {
-              if (settled) return;
+              if (data.requestId !== requestId || settled) return;
               settled = true;
+              subscriptions.forEach(sub => sub.remove());
               onComplete(data as GenerationCompleteEvent);
             }
           )
@@ -298,8 +312,9 @@ class LLMServiceImpl {
           this.eventEmitter.addListener(
             'onGenerationError',
             (data: any) => {
-              if (settled) return;
+              if (data.requestId !== requestId || settled) return;
               settled = true;
+              subscriptions.forEach(sub => sub.remove());
               onError(data as GenerationErrorEvent);
             }
           )
@@ -308,7 +323,7 @@ class LLMServiceImpl {
     }
 
     try {
-      await NativeLLM.startGeneration(prompt);
+      await NativeLLM.startGeneration(prompt, requestId, ownerId);
     } catch (err) {
       subscriptions.forEach((sub) => sub.remove());
       throw err;
@@ -324,7 +339,8 @@ class LLMServiceImpl {
    */
   public generate(
     prompt: string,
-    onStream?: (chunk: string) => void
+    onStream?: (chunk: string) => void,
+    ownerId: string = '',
   ): Promise<string> {
     return new Promise(async (resolve, reject) => {
       let unsubscribe: (() => void) | null = null;
@@ -357,8 +373,10 @@ class LLMServiceImpl {
             settled = true;
             cleanup();
             reject(new Error(errorEvent.error));
-          }
+          },
+          ownerId,
         );
+        if (settled) cleanup();
       } catch (err) {
         if (!settled) {
           settled = true;
@@ -380,8 +398,11 @@ class LLMServiceImpl {
   public generateWithVision(
     prompt: string,
     imagePath: string,
-    onStream?: (chunk: string) => void
+    onStream?: (chunk: string) => void,
+    ownerId: string = '',
   ): Promise<string> {
+    if (!this.eventEmitter) return Promise.reject(new Error('Local inference is unavailable'));
+    const requestId = `${Date.now()}-${++this.requestSequence}`;
     return new Promise(async (resolve, reject) => {
       const subscriptions: {remove: () => void}[] = [];
       let settled = false;
@@ -394,13 +415,13 @@ class LLMServiceImpl {
       if (this.eventEmitter) {
         subscriptions.push(
           this.eventEmitter.addListener('onToken', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             if (onStream) onStream(data.token);
           })
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             settled = true;
             cleanup();
             resolve(data.fullText);
@@ -408,7 +429,7 @@ class LLMServiceImpl {
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationError', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             settled = true;
             cleanup();
             reject(new Error(data.error));
@@ -417,7 +438,7 @@ class LLMServiceImpl {
       }
 
       try {
-        await NativeLLM.startGenerationWithImage(prompt, imagePath);
+        await NativeLLM.startGenerationWithImage(prompt, imagePath, requestId, ownerId);
       } catch (err) {
         if (!settled) {
           settled = true;
@@ -439,8 +460,11 @@ class LLMServiceImpl {
   public generateWithAudio(
     prompt: string,
     audioPath: string,
-    onStream?: (chunk: string) => void
+    onStream?: (chunk: string) => void,
+    ownerId: string = '',
   ): Promise<string> {
+    if (!this.eventEmitter) return Promise.reject(new Error('Local inference is unavailable'));
+    const requestId = `${Date.now()}-${++this.requestSequence}`;
     return new Promise(async (resolve, reject) => {
       const subscriptions: {remove: () => void}[] = [];
       let settled = false;
@@ -453,13 +477,13 @@ class LLMServiceImpl {
       if (this.eventEmitter) {
         subscriptions.push(
           this.eventEmitter.addListener('onToken', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             if (onStream) onStream(data.token);
           })
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationComplete', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             settled = true;
             cleanup();
             resolve(data.fullText);
@@ -467,7 +491,7 @@ class LLMServiceImpl {
         );
         subscriptions.push(
           this.eventEmitter.addListener('onGenerationError', (data: any) => {
-            if (settled) return;
+            if (data.requestId !== requestId || settled) return;
             settled = true;
             cleanup();
             reject(new Error(data.error));
@@ -476,7 +500,7 @@ class LLMServiceImpl {
       }
 
       try {
-        await NativeLLM.startGenerationWithAudio(prompt, audioPath);
+        await NativeLLM.startGenerationWithAudio(prompt, audioPath, requestId, ownerId);
       } catch (err) {
         if (!settled) {
           settled = true;
@@ -490,9 +514,9 @@ class LLMServiceImpl {
   /**
    * Immediately stops active token generation
    */
-  public async stopGeneration(): Promise<boolean> {
+  public async stopGeneration(ownerId: string = ''): Promise<boolean> {
     try {
-      return await NativeLLM.stopGeneration();
+      return await NativeLLM.stopGeneration(ownerId);
     } catch (err) {
       console.error('[LLMService] stopGeneration error:', err);
       return false;
@@ -545,9 +569,9 @@ class LLMServiceImpl {
   /**
    * Drops the conversation history / KV cache and starts a fresh one on the same engine
    */
-  public async resetConversation(): Promise<boolean> {
+  public async resetConversation(ownerId: string = ''): Promise<boolean> {
     try {
-      return await NativeLLM.resetConversation();
+      return await NativeLLM.resetConversation(ownerId);
     } catch (err) {
       console.error('[LLMService] resetConversation error:', err);
       return false;

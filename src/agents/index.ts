@@ -8,10 +8,11 @@
  *   agentOrchestrator.registerAgent(myCustomAgent);
  *
  *   // Execute
- *   const result = await agentOrchestrator.execute("Do something", onStep);
+ *   const taskId = await agentRuntime.start("Do something", loadedModelId);
  */
 
 export {agentOrchestrator} from './agentOrchestrator';
+export {agentRuntime} from './agentRuntime';
 export {AccessibilityAgent} from './accessibilityAgent';
 export {buildActionPrompt, parseActionResponse} from './promptBuilder';
 export type {

@@ -8,6 +8,7 @@ import com.ashish.technologies.aotg.NativeAccessibilitySpec
 import com.ashish.technologies.aotg.services.AOTGAccessibilityService
 import com.ashish.technologies.aotg.services.AgentForegroundService
 import com.ashish.technologies.aotg.turbo_modules.liveaudio.LiveAudioModule
+import com.ashish.technologies.aotg.turbo_modules.llm.LLMModule
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -268,7 +269,7 @@ class AccessibilityModule(
     /**
      * Starts a foreground service to keep the RN process alive while the agent runs.
      */
-    override fun startAgentService(promise: Promise) {
+    override fun startAgentService(taskId: String, timeoutMs: Double, promise: Promise) {
         try {
             if (LiveAudioModule.isLiveSessionRunning) {
                 promise.reject(
@@ -277,8 +278,9 @@ class AccessibilityModule(
                 )
                 return
             }
-            AgentForegroundService.start(reactContext)
-            promise.resolve(true)
+            check(LLMModule.activeInstance?.ownsAgentSession(taskId) == true) { "Task does not own the model" }
+            check(timeoutMs.isFinite() && timeoutMs > 0) { "Invalid task timeout" }
+            AgentForegroundService.start(reactContext, taskId, timeoutMs.toLong(), promise)
         } catch (e: Exception) {
             Log.e(TAG, "startAgentService error: ${e.message}", e)
             promise.reject("ERR_START_SERVICE", e.message, e)
@@ -288,13 +290,32 @@ class AccessibilityModule(
     /**
      * Stops the agent foreground service.
      */
-    override fun stopAgentService(promise: Promise) {
+    override fun stopAgentService(taskId: String, promise: Promise) {
         try {
-            AgentForegroundService.stop(reactContext)
-            promise.resolve(true)
+            promise.resolve(AgentForegroundService.stop(reactContext, taskId))
         } catch (e: Exception) {
             Log.e(TAG, "stopAgentService error: ${e.message}", e)
             promise.reject("ERR_STOP_SERVICE", e.message, e)
+        }
+    }
+
+    override fun cancelAgentTask(taskId: String, promise: Promise) {
+        promise.resolve(AgentForegroundService.requestCancel(reactContext, taskId))
+    }
+
+    override fun getAgentServiceState(promise: Promise) {
+        promise.resolve(AgentForegroundService.state(reactContext).toString())
+    }
+
+    override fun executeAgentAction(taskId: String, observation: String, action: String, promise: Promise) {
+        executor.execute {
+            try {
+                check(AgentForegroundService.canAct(reactContext, taskId)) { "Agent is paused or stopped" }
+                val service = getServiceOrReject(promise) ?: return@execute
+                promise.resolve(service.executeAgentAction(taskId, observation, action))
+            } catch (error: Exception) {
+                promise.reject("ERR_AGENT_ACTION", error.message, error)
+            }
         }
     }
 

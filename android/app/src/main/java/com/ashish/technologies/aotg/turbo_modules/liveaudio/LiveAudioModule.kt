@@ -87,6 +87,8 @@ class LiveAudioModule(
         @Volatile
         internal var isLiveSessionRunning = false
             private set
+        @Volatile internal var isLiveSessionStarting = false
+            private set
 
         private fun ensureNativeLoaded(): Boolean {
             if (nativeLibLoaded) return true
@@ -284,7 +286,7 @@ class LiveAudioModule(
             return
         }
 
-        if (AgentForegroundService.isRunning) {
+        if (AgentForegroundService.isRunning || LLMModule.activeInstance?.hasAgentOwner() == true) {
             promise.reject(
                 "ERR_AGENT_RUNNING",
                 "Cannot start Live Voice Talk while the Accessibility Agent is running."
@@ -310,6 +312,7 @@ class LiveAudioModule(
             return
         }
         startSessionCancelRequested = false
+        isLiveSessionStarting = true
 
         moduleScope.launch {
             sessionControlMutex.withLock {
@@ -446,6 +449,7 @@ class LiveAudioModule(
                     promise.reject("ERR_START_SESSION", t.message ?: "Failed to start Live Talk session.", t)
                 } finally {
                     isSessionStarting.set(false)
+                    isLiveSessionStarting = false
                 }
             }
         }
@@ -1441,7 +1445,6 @@ class LiveAudioModule(
 
     private suspend fun cleanupSessionInternal() {
         val wasActive = isSessionActive.getAndSet(false)
-        isLiveSessionRunning = false
         activeTurnEpoch.incrementAndGet()
         activeTurnId = ""
         currentTurnUserText = ""
@@ -1481,6 +1484,8 @@ class LiveAudioModule(
             }
         }
 
+        // Keep model ownership unavailable to agents until Live Talk teardown finishes.
+        isLiveSessionRunning = false
         if (wasActive) {
             transitionJsState("IDLE")
         }
@@ -1489,6 +1494,7 @@ class LiveAudioModule(
     private fun cleanupSessionBlocking() {
         isSessionActive.set(false)
         isSessionStarting.set(false)
+        isLiveSessionStarting = false
         isLiveSessionRunning = false
         activeTurnEpoch.incrementAndGet()
         stopAllTtsEngines()

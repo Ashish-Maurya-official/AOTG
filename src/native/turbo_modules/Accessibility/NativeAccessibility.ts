@@ -41,9 +41,13 @@ export interface Spec extends TurboModule {
 
   // Agent foreground service control
   /** Starts a foreground service to keep the RN process alive while the agent runs */
-  startAgentService(): Promise<boolean>;
+  startAgentService(taskId: string, timeoutMs: number): Promise<boolean>;
   /** Stops the agent foreground service */
-  stopAgentService(): Promise<boolean>;
+  stopAgentService(taskId: string): Promise<boolean>;
+  cancelAgentTask(taskId: string): Promise<boolean>;
+  getAgentServiceState(): Promise<string>;
+  /** Validates the observed screen and task ownership before any UI side effect. */
+  executeAgentAction(taskId: string, observation: string, action: string): Promise<boolean>;
 
   // Event emitter support
   addListener(eventName: string): void;

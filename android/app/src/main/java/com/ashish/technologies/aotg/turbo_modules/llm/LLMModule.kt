@@ -5,6 +5,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.ashish.technologies.aotg.NativeLLMSpec
+import com.ashish.technologies.aotg.services.AgentForegroundService
+import com.ashish.technologies.aotg.turbo_modules.liveaudio.LiveAudioModule
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -112,7 +114,9 @@ class LLMModule(
      * into the next run.
      */
     private class GenerationSession(
-        val isLiveTurn: Boolean = false
+        val isLiveTurn: Boolean = false,
+        val requestId: String = "",
+        val ownerId: String = ""
     ) {
         val stop = AtomicBoolean(false)
         val pendingStart = AtomicBoolean(true)
@@ -121,6 +125,79 @@ class LLMModule(
     }
 
     @Volatile private var currentSession: GenerationSession? = null
+    @Volatile private var agentOwnerId: String? = null
+
+    internal fun hasAgentOwner(): Boolean = agentOwnerId != null
+    internal fun ownsAgentSession(taskId: String): Boolean = agentOwnerId == taskId
+
+    private fun requireModelOwner(ownerId: String = "") {
+        check((agentOwnerId ?: "") == ownerId) { "The model is reserved by another task" }
+    }
+
+    override fun claimAgentSession(taskId: String, promise: Promise) {
+        coroutineScope.launch(actorDispatcher) {
+            try {
+                lifecycleMutex.withLock {
+                    check(taskId.isNotBlank() && agentOwnerId == null) { "An agent already owns the model" }
+                    check(!isInitializing.get() && !isGenerationActive() &&
+                        !LiveAudioModule.isLiveSessionRunning && !LiveAudioModule.isLiveSessionStarting) {
+                        "Finish the current chat or Live Talk session before starting an agent"
+                    }
+                    val eng = engine
+                    check(isLoaded && eng != null) { "Load a model before starting an agent" }
+                    agentOwnerId = taskId
+                    try {
+                        closeConversationSafely()
+                        conversation = createConfiguredConversation(eng, null)
+                        activeLiveConversationSpec = null
+                        conversationNeedsReset = false
+                        promise.resolve(true)
+                    } catch (error: Throwable) {
+                        agentOwnerId = null
+                        throw error
+                    }
+                }
+            } catch (error: Throwable) {
+                promise.reject("ERR_AGENT_MODEL", error.message, error)
+            }
+        }
+    }
+
+    private suspend fun releaseAgentOwner(taskId: String): Boolean {
+        return lifecycleMutex.withLock {
+            if (agentOwnerId != taskId) return@withLock false
+            check(stopGenerationAndAwait()) { "Agent inference has not stopped yet" }
+            val eng = engine
+            if (isLoaded && eng != null) {
+                closeConversationSafely()
+                conversation = createConfiguredConversation(eng, null)
+                activeLiveConversationSpec = null
+                conversationNeedsReset = false
+            }
+            agentOwnerId = null
+            true
+        }
+    }
+
+    override fun releaseAgentSession(taskId: String, promise: Promise) {
+        coroutineScope.launch(actorDispatcher) {
+            try {
+                promise.resolve(releaseAgentOwner(taskId))
+            } catch (error: Throwable) {
+                promise.reject("ERR_AGENT_RELEASE", error.message, error)
+            }
+        }
+    }
+
+    internal fun releaseAgentSessionAfterService(taskId: String) {
+        coroutineScope.launch(actorDispatcher) {
+            try {
+                releaseAgentOwner(taskId)
+            } catch (error: Throwable) {
+                Log.e(TAG, "Agent cleanup failed; keeping model reserved", error)
+            }
+        }
+    }
 
     // Real LiteRT-LM engine
     @Volatile private var engine: Engine? = null
@@ -251,8 +328,9 @@ class LLMModule(
             if (!finished) {
                 Log.w(TAG, "Generation did not stop within ${STOP_TIMEOUT_MS}ms — force-cancelling job")
                 job.cancel()
-                withTimeoutOrNull(1000L) { job.join() }
+                finished = withTimeoutOrNull(1000L) { job.join() } != null
             }
+            check(finished) { "Generation is still stopping; the conversation cannot be replaced yet" }
         } else if (targetSession?.stop?.get() == true) {
             conversationNeedsReset = true
         }
@@ -306,9 +384,9 @@ class LLMModule(
         if (!finished) {
             Log.w(TAG, "Generation did not stop within ${timeoutMs}ms — force-cancelling job")
             job.cancel()
-            withTimeoutOrNull(1000L) { job.join() }
+            finished = withTimeoutOrNull(1000L) { job.join() } != null
         }
-        currentSession = null
+        if (finished && currentSession === session) currentSession = null
         return finished
     }
 
@@ -436,6 +514,7 @@ class LLMModule(
         coroutineScope.launch {
             try {
                 lifecycleMutex.withLock {
+                    requireModelOwner()
                     if (currentModelPath?.endsWith(pathOrName) == true || currentModelPath == pathOrName) {
                         stopGenerationAndAwait()
                         releaseEngineResources()
@@ -829,6 +908,10 @@ class LLMModule(
         maxContextLength: Double,
         promise: Promise
     ) {
+        if (hasAgentOwner()) {
+            promise.reject("ERR_AGENT_MODEL", "Stop the agent before changing models")
+            return
+        }
         if (!isInitializing.compareAndSet(false, true)) {
             promise.reject("ERR_BUSY", "A model is already being loaded. Please wait for it to finish.")
             return
@@ -837,6 +920,10 @@ class LLMModule(
         coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
+                    if (hasAgentOwner()) {
+                        promise.reject("ERR_AGENT_MODEL", "Stop the agent before changing models")
+                        return@withLock
+                    }
                     val file = if (modelPath.startsWith("/") || modelPath.startsWith("file:")) {
                         File(modelPath.removePrefix("file://"))
                     } else {
@@ -931,10 +1018,19 @@ class LLMModule(
      * [Conversation] once.
      */
     private fun startGenerationInternal(
+        requestId: String,
+        ownerId: String,
         needsVisionRestore: Boolean = false,
         buildContents: () -> Contents,
         promise: Promise
     ) {
+        try {
+            requireModelOwner(ownerId)
+            check(ownerId.isEmpty() || AgentForegroundService.canAct(reactApplicationContext, ownerId)) { "Agent task is paused or stopped" }
+        } catch (error: Exception) {
+            promise.reject("ERR_MODEL_OWNER", error.message, error)
+            return
+        }
         if (conversation == null || engine == null || !isLoaded) {
             promise.reject("ERR_NOT_LOADED", "No LiteRT-LM model is currently loaded in memory. Please download and load a model first.")
             return
@@ -951,7 +1047,7 @@ class LLMModule(
         }
 
         val previous = currentSession
-        val session = GenerationSession(isLiveTurn = false)
+        val session = GenerationSession(isLiveTurn = false, requestId = requestId, ownerId = ownerId)
         currentSession = session
         promise.resolve(true)
 
@@ -959,6 +1055,8 @@ class LLMModule(
             try {
                 var conv: Conversation? = null
                 lifecycleMutex.withLock {
+                    requireModelOwner(ownerId)
+                    check(ownerId.isEmpty() || AgentForegroundService.canAct(reactApplicationContext, ownerId)) { "Agent task is paused or stopped" }
                     if (session.stop.get()) {
                         session.pendingStart.set(false)
                         return@withLock
@@ -1009,6 +1107,7 @@ class LLMModule(
                     session.text.append(chunkText)
 
                     val tokenMap = Arguments.createMap().apply {
+                        putString("requestId", session.requestId)
                         putString("token", chunkText)
                         putString("text", session.text.toString())
                         putBoolean("isFinished", false)
@@ -1018,6 +1117,7 @@ class LLMModule(
 
                 if (!session.stop.get()) {
                     sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
+                        putString("requestId", session.requestId)
                         putString("fullText", session.text.toString())
                         putBoolean("isFinished", true)
                     })
@@ -1030,6 +1130,7 @@ class LLMModule(
                 } else {
                     Log.e(TAG, "Generation failed: ${t.message}", t)
                     sendEvent(EVENT_ON_GENERATION_ERROR, Arguments.createMap().apply {
+                        putString("requestId", session.requestId)
                         putString("error", t.message ?: "Unknown LiteRT-LM generation error")
                     })
                 }
@@ -1044,8 +1145,8 @@ class LLMModule(
     /**
      * Real LiteRT-LM Output Generation using streaming conversation
      */
-    override fun startGeneration(prompt: String, promise: Promise) {
-        startGenerationInternal(buildContents = { Contents.of(Content.Text(prompt)) }, promise = promise)
+    override fun startGeneration(prompt: String, requestId: String, ownerId: String, promise: Promise) {
+        startGenerationInternal(requestId, ownerId, buildContents = { Contents.of(Content.Text(prompt)) }, promise = promise)
     }
 
     /**
@@ -1055,8 +1156,8 @@ class LLMModule(
      * The [imagePath] must be an absolute path to a JPEG or PNG file on the device.
      * Falls back to text-only generation if the image file is missing.
      */
-    override fun startGenerationWithImage(prompt: String, imagePath: String, promise: Promise) {
-        startGenerationInternal(needsVisionRestore = true, buildContents = {
+    override fun startGenerationWithImage(prompt: String, imagePath: String, requestId: String, ownerId: String, promise: Promise) {
+        startGenerationInternal(requestId, ownerId, needsVisionRestore = true, buildContents = {
             val imageFile = File(imagePath)
             if (imageFile.exists() && imageFile.length() > 0) {
                 Log.d(TAG, "Vision inference: using image ${imageFile.absolutePath} (${imageFile.length()} bytes)")
@@ -1078,8 +1179,8 @@ class LLMModule(
      * The [audioPath] must be an absolute path to an audio file (WAV, MP3, etc.) on the device.
      * Falls back to text-only generation if the audio file is missing.
      */
-    override fun startGenerationWithAudio(prompt: String, audioPath: String, promise: Promise) {
-        startGenerationInternal(buildContents = {
+    override fun startGenerationWithAudio(prompt: String, audioPath: String, requestId: String, ownerId: String, promise: Promise) {
+        startGenerationInternal(requestId, ownerId, buildContents = {
             val audioFile = File(audioPath)
             if (audioFile.exists() && audioFile.length() > 0) {
                 Log.d(TAG, "Audio inference: using audio ${audioFile.absolutePath} (${audioFile.length()} bytes)")
@@ -1099,11 +1200,19 @@ class LLMModule(
      * and dispatches `job.join()` + single Conversation recreation on the serialized
      * Engine Actor (eliminating any dual-reset race).
      */
-    override fun stopGeneration(promise: Promise) {
+    override fun stopGeneration(ownerId: String, promise: Promise) {
+        promise.resolve(stopOwnedGeneration(ownerId))
+    }
+
+    internal fun cancelAgentGeneration(taskId: String) {
+        if (agentOwnerId == taskId) stopOwnedGeneration(taskId)
+    }
+
+    private fun stopOwnedGeneration(ownerId: String): Boolean {
         val session = currentSession
-        if (session == null || (!session.pendingStart.get() && session.job?.isActive != true) || session.stop.get()) {
-            promise.resolve(false)
-            return
+        if (session == null || session.ownerId != ownerId ||
+            (!session.pendingStart.get() && session.job?.isActive != true) || session.stop.get()) {
+            return false
         }
 
         session.stop.set(true)
@@ -1112,24 +1221,30 @@ class LLMModule(
 
         val partial = session.text.toString()
         sendEvent(EVENT_ON_GENERATION_STOPPED, Arguments.createMap().apply {
+            putString("requestId", session.requestId)
             putString("reason", "cancelled")
         })
         sendEvent(EVENT_ON_GENERATION_COMPLETE, Arguments.createMap().apply {
+            putString("requestId", session.requestId)
             putString("fullText", partial)
             putBoolean("isFinished", true)
         })
-        promise.resolve(true)
-
         coroutineScope.launch(actorDispatcher) {
-            lifecycleMutex.withLock {
-                if (currentSession === session || conversationNeedsReset) {
-                    awaitSessionAndRecreateLocked(if (currentSession === session) session else null)
+            try {
+                lifecycleMutex.withLock {
+                    // A later generation owns its own reset; never rebuild its conversation here.
                     if (currentSession === session) {
-                        currentSession = null
+                        awaitSessionAndRecreateLocked(session)
+                        if (currentSession === session) {
+                            currentSession = null
+                        }
                     }
                 }
+            } catch (error: Throwable) {
+                Log.e(TAG, "Generation cleanup failed; retaining the session until it stops", error)
             }
         }
+        return true
     }
 
     /**
@@ -1171,10 +1286,11 @@ class LLMModule(
      * Drops the current conversation (and its KV cache) and starts a fresh one on
      * the same engine. Used when the context window is exhausted.
      */
-    override fun resetConversation(promise: Promise) {
+    override fun resetConversation(ownerId: String, promise: Promise) {
         coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
+                    requireModelOwner(ownerId)
                     val eng = engine
                     if (eng == null || !eng.isInitialized() || !isLoaded) {
                         promise.reject("ERR_NOT_LOADED", "No model is loaded.")
@@ -1201,6 +1317,7 @@ class LLMModule(
         coroutineScope.launch(actorDispatcher) {
             try {
                 lifecycleMutex.withLock {
+                    requireModelOwner()
                     val stopped = stopGenerationAndAwait()
                     if (!stopped) {
                         Log.w(TAG, "Proceeding with unload after generation stop timeout")
@@ -1251,6 +1368,7 @@ class LLMModule(
         disableVision: Boolean = true
     ): LivePrepareResult = withContext(actorDispatcher) {
         lifecycleMutex.withLock {
+            requireModelOwner()
             val eng = engine
             val modelPath = currentModelPath
             if (eng == null || !eng.isInitialized() || !isLoaded || modelPath == null) {
@@ -1336,6 +1454,7 @@ class LLMModule(
         committedHistory: List<LiveTurnMessage>,
         disableThinking: Boolean = true
     ): Boolean {
+        if (hasAgentOwner()) return false
         currentSession?.let { active ->
             active.stop.set(true)
             conversationNeedsReset = true
@@ -1343,6 +1462,7 @@ class LLMModule(
         }
         return withContext(actorDispatcher) {
             lifecycleMutex.withLock {
+                if (hasAgentOwner()) return@withLock false
                 val eng = engine
                 if (eng == null || !eng.isInitialized() || !isLoaded) {
                     return@withLock false
@@ -1372,6 +1492,7 @@ class LLMModule(
         }
         withContext(actorDispatcher) {
             lifecycleMutex.withLock {
+                if (hasAgentOwner()) return@withLock
                 if (!isLoaded || engine == null) return@withLock
                 awaitSessionAndRecreateLocked(
                     targetSession = if (currentSession?.isLiveTurn == true) currentSession else null,

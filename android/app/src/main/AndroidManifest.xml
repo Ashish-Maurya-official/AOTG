@@ -56,7 +56,11 @@
       <service
           android:name=".services.AgentForegroundService"
           android:foregroundServiceType="specialUse"
-          android:exported="false" />
+          android:exported="false">
+          <property
+              android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+              android:value="User-started on-device automation session with visible progress and a Stop action, operating while the target app is visible." />
+      </service>
     </application>
 </manifest>
 

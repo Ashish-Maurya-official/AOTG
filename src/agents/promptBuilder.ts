@@ -324,13 +324,13 @@ function validateAction(action: AgentAction): AgentAction {
   switch (action.type) {
     case 'click':
     case 'long_click':
-      if (!action.target) {
+      if (typeof action.target !== 'string' || !action.target.trim()) {
         return {type: 'error', message: `"${action.type}" action is missing a "target" element id`};
       }
       return action;
 
     case 'set_text':
-      if (!action.target) {
+      if (typeof action.target !== 'string' || !action.target.trim()) {
         return {type: 'error', message: '"set_text" action is missing a "target" element id'};
       }
       if (typeof action.value !== 'string') {
@@ -339,29 +339,30 @@ function validateAction(action: AgentAction): AgentAction {
       return action;
 
     case 'scroll':
-      if (!action.target) {
+      if (typeof action.target !== 'string' || !action.target.trim()) {
         return {type: 'error', message: '"scroll" action is missing a "target" element id'};
       }
       if (action.direction !== 'forward' && action.direction !== 'backward') {
-        return {...action, direction: 'forward'};
+        return {type: 'error', message: 'Invalid scroll direction'};
       }
       return action;
 
     case 'tap_coordinates':
-      if (!isNum(action.x) || !isNum(action.y)) {
+      if (!isNum(action.x) || !isNum(action.y) || action.x < 0 || action.y < 0) {
         return {type: 'error', message: '"tap_coordinates" requires numeric "x" and "y"'};
       }
       return action;
 
     case 'swipe':
-      if (!isNum(action.startX) || !isNum(action.startY) || !isNum(action.endX) || !isNum(action.endY)) {
+      if (!isNum(action.startX) || !isNum(action.startY) || !isNum(action.endX) || !isNum(action.endY) ||
+          Math.min(action.startX, action.startY, action.endX, action.endY) < 0) {
         return {type: 'error', message: '"swipe" requires numeric start/end coordinates'};
       }
       return action;
 
     case 'wait':
-      if (!isNum(action.durationMs)) {
-        return {...action, durationMs: 500};
+      if (!isNum(action.durationMs) || action.durationMs < 0 || action.durationMs > 5000) {
+        return {type: 'error', message: 'Wait duration must be between 0 and 5000 milliseconds'};
       }
       return action;
 

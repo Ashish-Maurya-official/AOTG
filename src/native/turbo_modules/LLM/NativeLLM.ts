@@ -34,19 +34,21 @@ export interface Spec extends TurboModule {
 
   initialize(modelPath: string, backend: string, isVision: boolean, isAudio: boolean, maxContextLength: number): Promise<InitializeResult>;
   /** Text-only generation */
-  startGeneration(prompt: string): Promise<boolean>;
+  startGeneration(prompt: string, requestId: string, ownerId: string): Promise<boolean>;
   /** Multimodal generation with optional image — imagePath is an absolute file path on device */
-  startGenerationWithImage(prompt: string, imagePath: string): Promise<boolean>;
+  startGenerationWithImage(prompt: string, imagePath: string, requestId: string, ownerId: string): Promise<boolean>;
   /** Multimodal generation with audio — audioPath is an absolute file path on device */
-  startGenerationWithAudio(prompt: string, audioPath: string): Promise<boolean>;
-  stopGeneration(): Promise<boolean>;
+  startGenerationWithAudio(prompt: string, audioPath: string, requestId: string, ownerId: string): Promise<boolean>;
+  stopGeneration(ownerId: string): Promise<boolean>;
+  claimAgentSession(taskId: string): Promise<boolean>;
+  releaseAgentSession(taskId: string): Promise<boolean>;
   /** True while the model is actively decoding a response */
   isGenerating(): Promise<boolean>;
   isModelLoaded(): Promise<boolean>;
   /** KV-cache usage of the live conversation */
   getContextUsage(): Promise<ContextUsage>;
   /** Drop the conversation history / KV cache and start a fresh one on the same engine */
-  resetConversation(): Promise<boolean>;
+  resetConversation(ownerId: string): Promise<boolean>;
   unloadModel(): Promise<boolean>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;

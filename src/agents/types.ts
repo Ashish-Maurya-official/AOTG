@@ -41,6 +41,8 @@ export interface UIElement {
 /** Complete screen observation from the accessibility tree */
 export interface ScreenObservation {
   app: string;
+  windowId?: number;
+  screenEpoch?: number;
   timestamp: number;
   elements: UIElement[];
   totalNodes: number;
@@ -87,14 +89,19 @@ export interface AgentStep {
 /** Overall status of agent execution */
 export type AgentExecutionStatus =
   | 'idle'
+  | 'starting'
   | 'running'
+  | 'paused'
+  | 'cancelling'
   | 'completed'
   | 'failed'
+  | 'interrupted'
   | 'cancelled';
 
 /** Result of a complete agent execution */
 export interface AgentResult {
   success: boolean;
+  cancelled?: boolean;
   steps: AgentStep[];
   summary: string;
   error?: string;
@@ -108,6 +115,10 @@ export interface AgentResult {
 
 /** Configuration options for agent execution */
 export interface AgentConfig {
+  /** Set by the background runtime; never reuse a task ID. */
+  taskId?: string;
+  /** Includes time spent waiting for the device to unlock. */
+  taskTimeoutMs: number;
   /** Maximum number of observe→think→act steps before giving up */
   maxSteps: number;
   /** Delay in ms between steps to allow UI to update */
@@ -124,6 +135,7 @@ export interface AgentConfig {
 
 /** Default agent configuration */
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
+  taskTimeoutMs: 10 * 60 * 1000,
   maxSteps: 25,
   stepDelayMs: 800,
   includeScreenshots: true,   // Vision model takes a screenshot when supported
@@ -162,7 +174,7 @@ export interface Agent {
   execute(
     instruction: string,
     config: AgentConfig,
-    onStep: (step: AgentStep) => void,
+    onStep: (step: AgentStep) => void | Promise<void>,
   ): Promise<AgentResult>;
 
   /** Cancels the current execution */
@@ -177,4 +189,25 @@ export interface ScreenChangedEvent {
   packageName: string;
   className: string;
   eventType: number;
+}
+
+export interface AgentTask {
+  id: string;
+  instruction: string;
+  agentId: string;
+  modelId: string;
+  config: AgentConfig;
+  status: AgentExecutionStatus;
+  createdAt: number;
+  updatedAt: number;
+  steps: AgentStep[];
+  result: AgentResult | null;
+}
+
+export interface AgentServiceState {
+  taskId: string | null;
+  cancelled: boolean;
+  paused: boolean;
+  reason: string;
+  screenEpoch: number;
 }

@@ -3,9 +3,11 @@ import type {
   AgentStep,
   AgentResult,
   AgentExecutionStatus,
+  AgentTask,
 } from '../../agents/types';
 
 interface AgentState {
+  taskId: string | null;
   /** Whether the accessibility service is enabled in system settings */
   isServiceEnabled: boolean;
   /** Current execution status */
@@ -23,6 +25,7 @@ interface AgentState {
 }
 
 const initialState: AgentState = {
+  taskId: null,
   isServiceEnabled: false,
   executionStatus: 'idle',
   currentInstruction: null,
@@ -36,14 +39,35 @@ const agentSlice = createSlice({
   name: 'agent',
   initialState,
   reducers: {
+    restoreTask: (state, action: PayloadAction<AgentTask>) => {
+      const task = action.payload;
+      state.taskId = task.id;
+      state.executionStatus = task.status;
+      state.currentInstruction = task.instruction;
+      state.currentAgentId = task.agentId;
+      state.steps = task.steps;
+      state.lastResult = task.result;
+      state.error = task.result?.error || null;
+    },
+
+    setTaskStatus: (
+      state,
+      action: PayloadAction<{taskId: string; status: AgentExecutionStatus}>,
+    ) => {
+      if (state.taskId === action.payload.taskId &&
+          ['starting', 'running', 'paused', 'cancelling'].includes(state.executionStatus)) {
+        state.executionStatus = action.payload.status;
+      }
+    },
     setServiceEnabled: (state, action: PayloadAction<boolean>) => {
       state.isServiceEnabled = action.payload;
     },
 
     startExecution: (
       state,
-      action: PayloadAction<{instruction: string; agentId: string}>,
+      action: PayloadAction<{instruction: string; agentId: string; taskId: string}>,
     ) => {
+      state.taskId = action.payload.taskId;
       state.executionStatus = 'running';
       state.currentInstruction = action.payload.instruction;
       state.currentAgentId = action.payload.agentId;
@@ -52,8 +76,9 @@ const agentSlice = createSlice({
       state.error = null;
     },
 
-    updateStep: (state, action: PayloadAction<AgentStep>) => {
-      const step = action.payload;
+    updateStep: (state, action: PayloadAction<{taskId: string; step: AgentStep}>) => {
+      if (state.taskId !== action.payload.taskId) return;
+      const step = action.payload.step;
       const existingIndex = state.steps.findIndex(
         s => s.stepIndex === step.stepIndex,
       );
@@ -64,10 +89,12 @@ const agentSlice = createSlice({
       }
     },
 
-    completeExecution: (state, action: PayloadAction<AgentResult>) => {
-      state.executionStatus = action.payload.success ? 'completed' : 'failed';
-      state.lastResult = action.payload;
-      state.error = action.payload.error || null;
+    completeExecution: (state, action: PayloadAction<{taskId: string; result: AgentResult}>) => {
+      if (state.taskId !== action.payload.taskId) return;
+      const result = action.payload.result;
+      state.executionStatus = result.cancelled ? 'cancelled' : result.success ? 'completed' : 'failed';
+      state.lastResult = result;
+      state.error = result.error || null;
     },
 
     cancelExecution: state => {
@@ -75,6 +102,8 @@ const agentSlice = createSlice({
     },
 
     resetAgent: state => {
+      if (['starting', 'running', 'paused', 'cancelling'].includes(state.executionStatus)) return;
+      state.taskId = null;
       state.executionStatus = 'idle';
       state.currentInstruction = null;
       state.currentAgentId = null;
@@ -86,6 +115,8 @@ const agentSlice = createSlice({
 });
 
 export const {
+  restoreTask,
+  setTaskStatus,
   setServiceEnabled,
   startExecution,
   updateStep,

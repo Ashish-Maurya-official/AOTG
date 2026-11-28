@@ -7,7 +7,7 @@
 
 import {NativeEventEmitter, Platform} from 'react-native';
 import NativeAccessibility from '../native/turbo_modules/Accessibility/NativeAccessibility';
-import type {ScreenObservation, ScreenChangedEvent} from '../agents/types';
+import type {AgentAction, AgentServiceState, ScreenObservation, ScreenChangedEvent} from '../agents/types';
 
 class AccessibilityServiceImpl {
   private eventEmitter: NativeEventEmitter | null = null;
@@ -245,26 +245,33 @@ class AccessibilityServiceImpl {
    * agent operates in the background (observing and interacting with
    * other apps).
    */
-  async startAgentService(): Promise<boolean> {
-    try {
-      return await NativeAccessibility.startAgentService();
-    } catch (err) {
-      console.error('[AccessibilityService] startAgentService error:', err);
-      return false;
-    }
+  async startAgentService(taskId: string, timeoutMs: number): Promise<boolean> {
+    return NativeAccessibility.startAgentService(taskId, timeoutMs);
   }
 
   /**
    * Stops the agent foreground service. Should be called when the agent
    * execution completes, fails, or is cancelled.
    */
-  async stopAgentService(): Promise<boolean> {
-    try {
-      return await NativeAccessibility.stopAgentService();
-    } catch (err) {
-      console.error('[AccessibilityService] stopAgentService error:', err);
-      return false;
-    }
+  async stopAgentService(taskId: string): Promise<boolean> {
+    return NativeAccessibility.stopAgentService(taskId);
+  }
+
+  async cancelAgentTask(taskId: string): Promise<boolean> {
+    return NativeAccessibility.cancelAgentTask(taskId);
+  }
+
+  async getAgentServiceState(): Promise<AgentServiceState> {
+    return JSON.parse(await NativeAccessibility.getAgentServiceState());
+  }
+
+  async executeAgentAction(taskId: string, observation: ScreenObservation, action: AgentAction): Promise<boolean> {
+    return NativeAccessibility.executeAgentAction(taskId, JSON.stringify(observation), JSON.stringify(action));
+  }
+
+  onAgentControl(callback: (state: AgentServiceState) => void): {remove: () => void} | null {
+    const listener = (event: Object) => callback(event as AgentServiceState);
+    return this.eventEmitter?.addListener('onAgentControl', listener) || null;
   }
 
   // ─────────────────────────────────────────────────────────────

@@ -18,14 +18,10 @@ import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {RootState} from '../../store/store';
 import {
   setServiceEnabled,
-  startExecution,
-  updateStep,
-  completeExecution,
-  cancelExecution,
   resetAgent,
 } from '../../store/slices/agentSlice';
 import AccessibilityService from '../../services/accessibilityService';
-import agentOrchestrator from '../../agents/agentOrchestrator';
+import {agentRuntime} from '../../agents/agentRuntime';
 import type {AgentStep} from '../../agents/types';
 import {DEFAULT_AGENT_CONFIG} from '../../agents/types';
 import {AVAILABLE_MODELS} from '../../store/slices/llmSlice';
@@ -200,7 +196,7 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
   const dispatch = useDispatch();
   const scrollViewRef = useRef<ScrollView>(null);
 
-  const {executionStatus, steps, lastResult, error, isServiceEnabled: serviceEnabled} =
+  const {taskId, executionStatus, steps, lastResult, isServiceEnabled: serviceEnabled} =
     useSelector((state: RootState) => state.agent);
   const loadedModelId = useSelector((state: RootState) => state.llm.loadedModelId);
 
@@ -294,14 +290,6 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
       const cmd = text || instruction.trim();
       if (!cmd) return;
 
-      console.log('[AgentPage] 🚀 Dispatching startExecution:', cmd);
-      dispatch(
-        startExecution({
-          instruction: cmd,
-          agentId: 'accessibility-agent',
-        }),
-      );
-
       // Only enable vision (screenshots) when the loaded model can actually
       // accept images — otherwise run text-only against the accessibility tree.
       const loadedModel = AVAILABLE_MODELS.find(m => m.id === loadedModelId);
@@ -312,44 +300,24 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
       console.log('[AgentPage]   Model:', loadedModel?.name, '| useVision:', config.useVision);
 
       try {
-        const result = await agentOrchestrator.execute(
-          cmd,
-          (step: AgentStep) => {
-            console.log(`[AgentPage] Step update: #${step.stepIndex} status=${step.status}${step.action ? ' action=' + step.action.type : ''}`);
-            dispatch(updateStep(step));
-          },
-          config,
-        );
-
-        console.log('[AgentPage] ✅ Execution complete:', result.success ? 'SUCCESS' : 'FAILED', '|', result.summary);
-        dispatch(completeExecution(result));
+        await agentRuntime.start(cmd, loadedModelId, config);
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
         console.error('[AgentPage] ❌ Execution threw:', errMsg);
-        dispatch(
-          completeExecution({
-            success: false,
-            steps: [],
-            summary:
-              err instanceof Error
-                ? err.message
-                : 'Agent execution failed unexpectedly',
-            error:
-              err instanceof Error ? err.message : 'Unknown error',
-            startTime: Date.now(),
-            endTime: Date.now(),
-          }),
-        );
+        Alert.alert('Could not start agent', errMsg);
       }
     },
-    [instruction, dispatch, serviceEnabled, loadedModelId],
+    [instruction, serviceEnabled, loadedModelId],
   );
 
-  const handleCancel = useCallback(() => {
-    console.log('[AgentPage] ⏹️ Cancel button pressed');
-    agentOrchestrator.cancel();
-    dispatch(cancelExecution());
-  }, [dispatch]);
+  const handleCancel = useCallback(async () => {
+    if (!taskId) return;
+    try {
+      await agentRuntime.cancel(taskId);
+    } catch (err) {
+      Alert.alert('Could not stop agent', err instanceof Error ? err.message : 'Please try again');
+    }
+  }, [taskId]);
 
   const handleReset = useCallback(() => {
     console.log('[AgentPage] 🔄 Reset button pressed');
@@ -357,9 +325,9 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
     setInstruction('');
   }, [dispatch]);
 
-  const isRunning = executionStatus === 'running';
+  const isRunning = ['starting', 'running', 'paused', 'cancelling'].includes(executionStatus);
   const isIdle = executionStatus === 'idle';
-  const hasResult = executionStatus === 'completed' || executionStatus === 'failed' || executionStatus === 'cancelled';
+  const hasResult = ['completed', 'failed', 'cancelled', 'interrupted'].includes(executionStatus);
 
   return (
     <View style={[styles.container, {backgroundColor: colors.background}]}>
@@ -494,7 +462,9 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
                   color: lastResult.success ? colors.success : colors.error,
                 },
               ]}>
-              {lastResult.success ? '✓ Task Completed' : '✗ Task Failed'}
+              {executionStatus === 'cancelled' ? 'Task Cancelled' :
+                executionStatus === 'interrupted' ? 'Task Interrupted' :
+                lastResult.success ? '✓ Task Completed' : '✗ Task Failed'}
             </Text>
             <Text
               style={[
@@ -538,7 +508,8 @@ const AgentPage: React.FC<AgentPageProps> = ({onBack}) => {
             onPress={handleCancel}>
             <StopIcon color={colors.error} size={14} radius={3} />
             <Text style={[styles.cancelBtnText, {color: colors.error}]}>
-              Cancel
+              {executionStatus === 'cancelling' ? 'Stopping…' :
+                executionStatus === 'paused' ? 'Paused — Cancel' : 'Cancel'}
             </Text>
           </Pressable>
         ) : (

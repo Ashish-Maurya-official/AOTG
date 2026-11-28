@@ -103,14 +103,20 @@ class AgentOrchestratorImpl {
    */
   async execute(
     instruction: string,
-    onStep: (step: AgentStep) => void,
+    onStep: (step: AgentStep) => void | Promise<void>,
     config: AgentConfig = DEFAULT_AGENT_CONFIG,
     agentId?: string,
   ): Promise<AgentResult> {
+    if (this.currentAgent) {
+      throw new Error('An agent task is already running');
+    }
     // Use specified agent or auto-route
     let agent: Agent | null = null;
     if (agentId) {
       agent = this.agents.get(agentId) || null;
+    }
+    if (agentId && !agent) {
+      throw new Error(`Unknown agent: ${agentId}`);
     }
     if (!agent) {
       agent = this.routeInstruction(instruction);

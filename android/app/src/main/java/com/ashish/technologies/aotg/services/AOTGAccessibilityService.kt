@@ -171,6 +171,8 @@ class AOTGAccessibilityService : AccessibilityService() {
 
         try {
             result.put("app", root.packageName?.toString() ?: "unknown")
+            result.put("windowId", root.windowId)
+            result.put("screenEpoch", AgentForegroundService.currentScreenEpoch)
             result.put("timestamp", System.currentTimeMillis())
 
             // Flatten the tree into a list of actionable/visible elements
@@ -322,6 +324,60 @@ class AOTGAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** Reject a stale observation instead of interpreting a positional ID on a new screen. */
+    fun executeAgentAction(taskId: String, observation: String, actionJson: String): Boolean {
+        check(AgentForegroundService.canAct(this, taskId)) { "Agent is paused or stopped" }
+        val expected = JSONObject(observation)
+        val current = JSONObject(getUITree())
+        if (current.has("error") || current.optString("app") != expected.optString("app") ||
+            current.optInt("screenEpoch", -1) != expected.optInt("screenEpoch", -2) ||
+            current.optInt("windowId", -1) != expected.optInt("windowId", -2) ||
+            current.optJSONArray("elements").toString() != expected.optJSONArray("elements").toString()) {
+            return false
+        }
+        val action = JSONObject(actionJson)
+        val type = action.getString("type")
+        check(AgentForegroundService.canAct(this, taskId)) { "Agent is paused or stopped" }
+        return when (type) {
+            "click", "long_click", "set_text", "scroll" -> {
+                val elements = expected.getJSONArray("elements")
+                val targetId = action.getString("target")
+                val target = (0 until elements.length()).asSequence()
+                    .map { elements.getJSONObject(it) }
+                    .firstOrNull { it.getString("id") == targetId } ?: return false
+                val root = rootInActiveWindow ?: return false
+                try {
+                    if (root.packageName?.toString() != expected.getString("app") ||
+                        root.windowId != expected.getInt("windowId")) return false
+                    val bounds = target.getJSONObject("bounds")
+                    val node = findMatchingNode(root, target.optString("resourceId"), target.optString("text"),
+                        target.optString("type"), bounds.getInt("left"), bounds.getInt("top"),
+                        bounds.getInt("right"), bounds.getInt("bottom")) ?: return false
+                    try {
+                        check(AgentForegroundService.canAct(this, taskId)) { "Agent is paused or stopped" }
+                        if (!node.isEnabled || node.contentDescription?.toString().orEmpty() != target.optString("contentDescription")) {
+                            return false
+                        }
+                        val nativeAction = if (type == "scroll") {
+                            if (action.getString("direction") == "backward") "scroll_backward" else "scroll_forward"
+                        } else type
+                        executeAction(node, nativeAction, action.optString("value"))
+                    } finally {
+                        node.recycle()
+                    }
+                } finally {
+                    root.recycle()
+                }
+            }
+            "tap_coordinates" -> tapAtCoordinates(action.getDouble("x").toFloat(), action.getDouble("y").toFloat())
+            "swipe" -> swipeGesture(action.getDouble("startX").toFloat(), action.getDouble("startY").toFloat(),
+                action.getDouble("endX").toFloat(), action.getDouble("endY").toFloat(), 300L)
+            "back" -> pressBack()
+            "home" -> pressHome()
+            else -> false
+        }
+    }
+
     /**
      * Finds a node by matching against the ID we assigned during tree traversal.
      * We re-traverse the tree and match by position.
@@ -371,8 +427,8 @@ class AOTGAccessibilityService : AccessibilityService() {
             val nodeText = node.text?.toString() ?: ""
             val nodeResId = node.viewIdResourceName ?: ""
 
-            // At least bounds match — check if type also matches for confidence
-            if (nodeType == type || nodeResId == resourceId || nodeText == text) {
+            // A changed label or resource must not resolve to a different control.
+            if (nodeType == type && nodeResId == resourceId && nodeText == text) {
                 return AccessibilityNodeInfo.obtain(node)
             }
         }
