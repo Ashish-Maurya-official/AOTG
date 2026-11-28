@@ -331,7 +331,8 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
             model.supportedBackends,
             false,
             model.maxContextLength,
-            model.supportsAudio
+            model.supportsAudio,
+            model.supportsFunctionCalling,
           );
           dispatch(
             setLoadedModel({
@@ -356,6 +357,9 @@ export function useLiveAudio(options: UseLiveAudioOptions) {
         : { ttsEngine: ttsEnginePrefRef.current, voiceId: selectedVoiceIdRef.current };
       if (sessionAttemptIdRef.current !== attemptId) return;
 
+      const { prepareModelTools } = require('../agentCore/toolRuntime') as typeof import('../agentCore/toolRuntime');
+      await prepareModelTools(model.supportsFunctionCalling);
+      if (sessionAttemptIdRef.current !== attemptId) return;
       const caps = await liveAudioService.getCapabilities();
       if (sessionAttemptIdRef.current !== attemptId) return;
       dispatch(applyTtsCapabilities(caps));

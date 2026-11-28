@@ -244,6 +244,7 @@ class LiveAudioModule(
     @Volatile private var activeTurnId: String = ""
     @Volatile private var currentTurnUserText: String = ""
     @Volatile private var currentTurnFullSanitized: String = ""
+    @Volatile private var currentTurnSources: String = ""
     @Volatile private var activeLlmJob: Job? = null
     @Volatile private var pendingRecoveryGate: CompletableDeferred<Unit>? = null
 
@@ -950,6 +951,7 @@ class LiveAudioModule(
         val oldTurnId = activeTurnId
         val fullSanitizedSnapshot = currentTurnFullSanitized
         val userTextSnapshot = currentTurnUserText
+        val sourcesSnapshot = currentTurnSources
         activeTurnId = ""
         currentTurnUserText = ""
         currentTurnFullSanitized = ""
@@ -975,7 +977,8 @@ class LiveAudioModule(
                     turnId = oldTurnId,
                     userText = userTextSnapshot,
                     fullSanitized = fullSanitizedSnapshot,
-                    committedCharOffset = committedCharOffset
+                    committedCharOffset = committedCharOffset,
+                    sources = sourcesSnapshot
                 )
             } finally {
                 gate.complete(Unit)
@@ -989,6 +992,7 @@ class LiveAudioModule(
         val turnId = activeTurnId
         val userText = currentTurnUserText
         val assistantText = currentTurnFullSanitized
+        val sources = currentTurnSources
         activeTurnId = ""
         currentTurnUserText = ""
         currentTurnFullSanitized = ""
@@ -999,7 +1003,7 @@ class LiveAudioModule(
             sendEvent(EVENT_TURN_COMMITTED, Arguments.createMap().apply {
                 putString("turnId", turnId)
                 putString("userText", userText)
-                putString("assistantText", assistantText)
+                putString("assistantText", assistantText + sources)
                 putBoolean("wasInterrupted", false)
                 putString("inputMode", inputMode)
             })
@@ -1092,6 +1096,7 @@ class LiveAudioModule(
         }
 
         val userDisplayText: String
+        currentTurnSources = ""
         if (useOsAsrFallback) {
             val recognized = asrEngine.finishUtteranceAndAwaitText(turnEpoch)
             if (turnEpoch != activeTurnEpoch.get()) return
@@ -1118,6 +1123,9 @@ class LiveAudioModule(
         })
 
         val listener = object : LLMModule.LiveGenerationListener {
+            override fun onSources(markdown: String) {
+                if (turnEpoch == activeTurnEpoch.get() && isSessionActive.get()) currentTurnSources = markdown
+            }
             override fun onChunk(chunk: String) {
                 if (turnEpoch != activeTurnEpoch.get() || !isSessionActive.get()) return
                 val parsed = nativePushChunkerToken(chunk, false)
@@ -1223,7 +1231,8 @@ class LiveAudioModule(
         turnId: String,
         userText: String,
         fullSanitized: String,
-        committedCharOffset: Int
+        committedCharOffset: Int,
+        sources: String = ""
     ) {
         if (turnId.isNotEmpty() && committedTurnIds.add(turnId)) {
             val spokenPrefix = buildInterruptedPrefix(fullSanitized, committedCharOffset)
@@ -1236,7 +1245,7 @@ class LiveAudioModule(
             sendEvent(EVENT_TURN_COMMITTED, Arguments.createMap().apply {
                 putString("turnId", turnId)
                 putString("userText", userText)
-                putString("assistantText", spokenPrefix)
+                putString("assistantText", spokenPrefix + if (spokenPrefix.isNotBlank()) sources else "")
                 putBoolean("wasInterrupted", true)
                 putString("inputMode", inputMode)
             })
@@ -1278,6 +1287,7 @@ class LiveAudioModule(
         val oldTurnId = activeTurnId
         val fullSnapshot = currentTurnFullSanitized
         val userSnapshot = currentTurnUserText
+        val sourcesSnapshot = currentTurnSources
         activeTurnId = ""
         currentTurnUserText = ""
         currentTurnFullSanitized = ""
@@ -1291,7 +1301,7 @@ class LiveAudioModule(
         moduleScope.launch {
             try {
                 prevGate?.await()
-                commitInterruptedTurnAndRecover(oldTurnId, userSnapshot, fullSnapshot, committedOffset)
+                commitInterruptedTurnAndRecover(oldTurnId, userSnapshot, fullSnapshot, committedOffset, sourcesSnapshot)
                 if (terminateAfter) {
                     cleanupSessionInternal()
                 } else if (isSessionActive.get()) {

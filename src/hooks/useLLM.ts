@@ -11,7 +11,7 @@ export interface UseLLMReturn {
   activeBackend: string | null;
   streamedText: string;
   error: string | null;
-  loadModel: (modelPath: string, backend?: BackendType, supportedBackends?: BackendType[], isVision?: boolean, maxContextLength?: number, isAudio?: boolean) => Promise<InitializeResult>;
+  loadModel: (modelPath: string, backend?: BackendType, supportedBackends?: BackendType[], isVision?: boolean, maxContextLength?: number, isAudio?: boolean, supportsFunctionCalling?: boolean) => Promise<InitializeResult>;
   generate: (prompt: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithVision: (prompt: string, imagePath: string, onToken?: (token: string) => void) => Promise<string>;
   generateWithAudio: (prompt: string, audioPath: string, onToken?: (token: string) => void) => Promise<string>;
@@ -52,11 +52,12 @@ export const useLLM = (): UseLLMReturn => {
       supportedBackends: BackendType[] = ['CPU', 'GPU'],
       isVision: boolean = false,
       maxContextLength: number = 4096,
-      isAudio: boolean = false
+      isAudio: boolean = false,
+      supportsFunctionCalling: boolean = false,
     ): Promise<InitializeResult> => {
       setError(null);
       try {
-        const result = await LLMService.initialize(modelPath, backend, supportedBackends, isVision, maxContextLength, isAudio);
+        const result = await LLMService.initialize(modelPath, backend, supportedBackends, isVision, maxContextLength, isAudio, supportsFunctionCalling);
         setIsLoaded(result.success);
         setActiveBackend(result.actualBackend);
         return result;

@@ -5,6 +5,8 @@ jest.mock('react-native', () => ({
   })),
 }));
 
+jest.mock('../../agentCore/toolRuntime', () => ({ prepareModelTools: jest.fn(async () => {}) }));
+
 jest.mock('../../native/turbo_modules/LLM/NativeLLM', () => ({
   __esModule: true,
   default: {

@@ -46,6 +46,7 @@ import {
 } from '../../store/slices/llmSlice';
 import ModelSelectorModal from '../../components/ModelSelectorModal';
 import LiveTalkModal from '../../components/LiveTalkModal';
+import AgentToolActivity from '../../components/AgentToolActivity';
 import PermissionModal from '../../components/PermissionModal';
 import useLLM from '../../hooks/useLLM';
 import useLiveAudio from '../../hooks/useLiveAudio';
@@ -1003,7 +1004,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
             dispatch(startLoadingModel(selectedModel.id));
             try {
                 const modelPath = modelStatuses[selectedModel.id]?.localPath || selectedModel.fileName;
-                const result = await loadModel(modelPath, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength, selectedModel.supportsAudio);
+                const result = await loadModel(modelPath, preferredBackend, selectedModel.supportedBackends, selectedModel.supportsVision, selectedModel.maxContextLength, selectedModel.supportsAudio, selectedModel.supportsFunctionCalling);
                 dispatch(
                     setLoadedModel({
                         modelId: selectedModel.id,
@@ -1078,7 +1079,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                     if (relevantContext) {
                         finalPrompt = `[Document Context from ${attachment.name}]\n${relevantContext}\n\nUser Question: ${queryForModel || 'Summarize the document.'}`;
                     } else {
-                        finalPrompt = queryForModel || `[Attached file: ${attachment.name} - could not extract text]`;
+                        finalPrompt = `No relevant evidence was found in the attached document. Explain that the document could not answer the question; do not invent its contents.\nUser question: ${queryForModel || 'Summarize the document.'}`;
                     }
 
                     response = await generate(finalPrompt);
@@ -1379,6 +1380,7 @@ const HomePage = ({ onOpenAgent, onOpenSettings }: { onOpenAgent?: () => void; o
                                             <Text style={{ color: colors.primary, fontStyle: 'italic', marginBottom: 8 }}>Thinking deeply...</Text>
                                         )}
                                         <MessageRenderer content={streamedText || (selectedModel.supportsThinking && useThinking ? '' : 'Thinking...')} showThinking={useThinking} />
+                                        <AgentToolActivity mode="chat" />
                                         <Text style={{ color: colors.text, fontSize: 15, marginTop: 4 }}> ▋</Text>
                                     </View>
                                 )}

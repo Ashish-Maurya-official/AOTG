@@ -209,10 +209,13 @@ class LLMServiceImpl {
     supportedBackends: BackendType[] = ['CPU', 'GPU'],
     isVision: boolean = false,
     maxContextLength: number = 4096,
-    isAudio: boolean = false
+    isAudio: boolean = false,
+    supportsFunctionCalling: boolean = false,
   ): Promise<InitializeResult> {
     try {
       // Determine the fallback chain based on user preference and model capabilities.
+      const { prepareModelTools } = require('../agentCore/toolRuntime') as typeof import('../agentCore/toolRuntime');
+      await prepareModelTools(supportsFunctionCalling);
       const chainSet = new Set<BackendType>();
       const lowerPath = modelPath.toLowerCase();
       const isGpuPackaged =

@@ -29,6 +29,7 @@ import CopyIcon from '../../static/images/SVG/CopyIcon';
 import ReloadIcon from '../../static/images/SVG/ReloadIcon';
 import DeleteIcon from '../../static/images/SVG/DeleteIcon';
 import BrainIcon from '../../static/images/SVG/BrainIcon';
+import AgentToolSettings from '../../components/AgentToolSettings';
 
 const { width } = Dimensions.get('window');
 const isTablet = width >= 768;
@@ -527,6 +528,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
                 </View>
 
                 {/* ── 4. Local Storage & Cache Management ── */}
+                <AgentToolSettings />
                 <View style={styles.sectionHeaderRow}>
                     <Text style={[styles.sectionTitle, dynamicPrimaryTextStyle]}>STORAGE & MODEL FOOTPRINT</Text>
                     <View style={[styles.sectionDivider, dynamicDividerStyle]} />

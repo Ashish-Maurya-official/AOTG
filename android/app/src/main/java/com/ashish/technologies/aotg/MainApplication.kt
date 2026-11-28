@@ -23,6 +23,7 @@ class MainApplication : Application(), ReactApplication {
           add(com.ashish.technologies.aotg.turbo_modules.liveaudio.LiveAudioPackage())
           add(AccessibilityPackage())
           add(DocumentProcessorPackage())
+          add(com.ashish.technologies.aotg.turbo_modules.agenttools.AgentToolsPackage())
           add(MemoryPackage())
         },
     )

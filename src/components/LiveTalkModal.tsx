@@ -36,6 +36,7 @@ import {
 import MicIcon from '../static/images/SVG/MicIcon';
 import LiveIcon from '../static/images/SVG/LiveIcon';
 import { CloseIcon, StopIcon } from './SharedIcons';
+import AgentToolActivity from './AgentToolActivity';
 
 interface LiveTalkModalProps {
   liveTalk: LiveTalkSliceState;
@@ -1301,6 +1302,7 @@ export const LiveTalkModal: React.FC<LiveTalkModalProps> = memo(
             ) : null}
 
             {/* 4. Streaming Conversation Captions */}
+            <AgentToolActivity mode="live" />
             <ScrollView
               ref={scrollRef}
               style={styles.captionScroll}
